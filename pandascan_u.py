@@ -44,6 +44,8 @@ EVENT_COOLDOWN = 60  # Standard event cooldown (seconds)
 WHALE_COOLDOWN = 30  # Whale event cooldown (seconds)
 EPS = 1e-9  # Small epsilon for division safety
 LEGACY_EMIT_INTERVAL_SEC = 0.6
+V3_W_SECONDS = 120
+V3_EPS = 1e-9
 
 
 class PandaScanner:
@@ -76,6 +78,16 @@ class PandaScanner:
             'last_ignition_ts': 0,
             'last_fatigue_ts': 0,
             'last_whale_buy_ts': 0
+        }
+
+        # v3 rolling window state (per-run only)
+        self.v3_window_events = deque()
+        self.v3_wallet_stats = {}
+        self.v3_state = {
+            "TR1": {"active": False, "confidence": "LOW", "subject_id": ""},
+            "TR2": {"active": False, "confidence": "LOW", "subject_id": ""},
+            "TR3": {"active": False, "confidence": "LOW", "subject_id": ""},
+            "TR6": {"active": False, "confidence": "LOW", "subject_id": ""},
         }
         
         # File handles
@@ -388,6 +400,284 @@ class PandaScanner:
             self.wallet_has_sold.add(wallet)
         
         bucket['wallet_total_vol'][wallet] += token_amt
+
+    def _v3_stats_ensure_wallet(self, wallet):
+        if wallet not in self.v3_wallet_stats:
+            self.v3_wallet_stats[wallet] = {
+                "buy_amt": 0.0,
+                "sell_amt": 0.0,
+                "buy_count": 0,
+                "sell_count": 0
+            }
+
+    def _v3_window_add(self, ts_epoch, wallet, side, token_amt):
+        self._v3_stats_ensure_wallet(wallet)
+        self.v3_window_events.append((ts_epoch, wallet, side, token_amt))
+        stats = self.v3_wallet_stats[wallet]
+        if side == "BUY":
+            stats["buy_amt"] += token_amt
+            stats["buy_count"] += 1
+        else:
+            stats["sell_amt"] += token_amt
+            stats["sell_count"] += 1
+
+    def _v3_window_evict(self, ts_epoch_now):
+        cutoff = ts_epoch_now - V3_W_SECONDS
+        while self.v3_window_events and self.v3_window_events[0][0] < cutoff:
+            ts_epoch, wallet, side, token_amt = self.v3_window_events.popleft()
+            stats = self.v3_wallet_stats.get(wallet)
+            if not stats:
+                continue
+            if side == "BUY":
+                stats["buy_amt"] -= token_amt
+                stats["buy_count"] -= 1
+            else:
+                stats["sell_amt"] -= token_amt
+                stats["sell_count"] -= 1
+            stats["buy_amt"] = max(stats["buy_amt"], 0.0)
+            stats["sell_amt"] = max(stats["sell_amt"], 0.0)
+            stats["buy_count"] = max(stats["buy_count"], 0)
+            stats["sell_count"] = max(stats["sell_count"], 0)
+            if (
+                stats["buy_amt"] <= V3_EPS
+                and stats["sell_amt"] <= V3_EPS
+                and stats["buy_count"] == 0
+                and stats["sell_count"] == 0
+            ):
+                self.v3_wallet_stats.pop(wallet, None)
+
+    def _v3_eval_and_emit(self, ts_iso, ts_epoch):
+        total_buy = 0.0
+        total_sell = 0.0
+        wallet_vols = {}
+        wallet_counts = {}
+        for wallet, stats in self.v3_wallet_stats.items():
+            wallet_vol = stats["buy_amt"] + stats["sell_amt"]
+            wallet_count = stats["buy_count"] + stats["sell_count"]
+            wallet_vols[wallet] = wallet_vol
+            wallet_counts[wallet] = wallet_count
+            total_buy += stats["buy_amt"]
+            total_sell += stats["sell_amt"]
+
+        total_vol = total_buy + total_sell
+        unique_wallets = len([w for w, c in wallet_counts.items() if c > 0])
+        sorted_wallets = sorted(wallet_vols.items(), key=lambda item: item[1], reverse=True)
+        top5_wallets = sorted_wallets[:5]
+        top1_wallet = sorted_wallets[0][0] if sorted_wallets else ""
+        top1_vol = sorted_wallets[0][1] if sorted_wallets else 0.0
+        top1_share = top1_vol / max(total_vol, V3_EPS)
+        top1_count = wallet_counts.get(top1_wallet, 0)
+
+        top_seller_wallet = ""
+        top_seller_sell_amt = 0.0
+        top_seller_sell_count = 0
+        for wallet, stats in self.v3_wallet_stats.items():
+            if stats["sell_amt"] > top_seller_sell_amt:
+                top_seller_sell_amt = stats["sell_amt"]
+                top_seller_wallet = wallet
+                top_seller_sell_count = stats["sell_count"]
+
+        group_stats = {}
+        for wallet, stats in self.v3_wallet_stats.items():
+            wallet_vol = stats["buy_amt"] + stats["sell_amt"]
+            if wallet_vol <= V3_EPS:
+                continue
+            if wallet not in self.wallet_first_seen:
+                continue
+            _, first_seen_minute_iso = self.wallet_first_seen[wallet]
+            if not first_seen_minute_iso:
+                continue
+            group_stats.setdefault(first_seen_minute_iso, {"vol": 0.0, "wallets": set()})
+            group_stats[first_seen_minute_iso]["vol"] += wallet_vol
+            group_stats[first_seen_minute_iso]["wallets"].add(wallet)
+
+        best_group_id = ""
+        best_group_share = 0.0
+        best_group_wallets = []
+        best_group_wallets_count = 0
+        for group_id, stats in group_stats.items():
+            group_vol = stats["vol"]
+            group_wallets = stats["wallets"]
+            group_share = group_vol / max(total_vol, V3_EPS)
+            group_wallets_count = len(group_wallets)
+            if group_share > best_group_share:
+                best_group_id = group_id
+                best_group_share = group_share
+                best_group_wallets = sorted(group_wallets)
+                best_group_wallets_count = group_wallets_count
+
+        micro_wallets = {}
+        for wallet, stats in self.v3_wallet_stats.items():
+            wallet_vol = stats["buy_amt"] + stats["sell_amt"]
+            wallet_count = stats["buy_count"] + stats["sell_count"]
+            if wallet_vol <= 40 and wallet_count >= 2:
+                micro_wallets[wallet] = wallet_count
+        micro_wallet_count = len(micro_wallets)
+        micro_trade_count_total = sum(micro_wallets.values())
+        top_micro_wallets = sorted(micro_wallets.items(), key=lambda item: (-item[1], item[0]))
+        top_micro_wallets = [wallet for wallet, _count in top_micro_wallets[:20]]
+        micro_subject_members = ",".join(sorted(top_micro_wallets))
+
+        def emit_transition(trigger_type, active_now, confidence_now, subject_type, subject_id, subject_members, category, intel, warning, trigger_id):
+            prev_state = self.v3_state[trigger_type]
+            prev_active = prev_state["active"]
+            emit_type = None
+            if not prev_active and active_now:
+                emit_type = "ENTER"
+            elif prev_active and active_now and (
+                confidence_now != prev_state["confidence"] or subject_id != prev_state["subject_id"]
+            ):
+                emit_type = "UPDATE"
+            elif prev_active and not active_now:
+                emit_type = "EXIT"
+
+            if emit_type:
+                row = (
+                    f"{ts_iso}\t{self.mint}\t{emit_type}\t{category}\t{confidence_now}\t"
+                    f"{subject_type}\t{subject_id}\t{subject_members}\t{trigger_type}\t{trigger_id}\t"
+                    f"\t{intel}\t{warning}\tNONE\t\n"
+                )
+                self.v3_alerts_file.write(row)
+
+            if active_now:
+                self.v3_state[trigger_type] = {
+                    "active": True,
+                    "confidence": confidence_now,
+                    "subject_id": subject_id
+                }
+            else:
+                self.v3_state[trigger_type] = {
+                    "active": False,
+                    "confidence": "LOW",
+                    "subject_id": ""
+                }
+
+        # TR1 — Wallet Dominance Spike
+        tr1_condition = (
+            total_vol >= 300
+            and top1_share >= 0.55
+            and top1_count >= 3
+            and unique_wallets >= 4
+        )
+        tr1_clear = top1_share < 0.45 or total_vol < 200
+        tr1_prev_active = self.v3_state["TR1"]["active"]
+        tr1_active = (not tr1_clear) if tr1_prev_active else tr1_condition
+        if tr1_active:
+            if top1_share >= 0.70:
+                tr1_confidence = "HIGH"
+            elif top1_share >= 0.60:
+                tr1_confidence = "MEDIUM"
+            else:
+                tr1_confidence = "LOW"
+        else:
+            tr1_confidence = "LOW"
+        emit_transition(
+            "TR1",
+            tr1_active,
+            tr1_confidence,
+            "WALLET",
+            top1_wallet,
+            "",
+            "SINGLE POWERFUL WALLET",
+            "One wallet is dominating recent trade flow by share and frequency.",
+            "If this wallet reverses or exits, it can overwhelm liquidity and trigger follow-on selling.",
+            f"TR1:{top1_wallet}"
+        )
+
+        # TR2 — Wallet Sell Pressure Burst
+        top_seller_share = top_seller_sell_amt / max(total_vol, V3_EPS)
+        tr2_condition = (
+            total_sell >= 250
+            and top_seller_sell_amt >= 0.35 * total_vol
+            and top_seller_sell_count >= 2
+            and unique_wallets >= 4
+        )
+        tr2_clear = top_seller_sell_amt < 0.25 * total_vol or total_sell < 150
+        tr2_prev_active = self.v3_state["TR2"]["active"]
+        tr2_active = (not tr2_clear) if tr2_prev_active else tr2_condition
+        if tr2_active:
+            if top_seller_share >= 0.55:
+                tr2_confidence = "HIGH"
+            elif top_seller_share >= 0.45:
+                tr2_confidence = "MEDIUM"
+            else:
+                tr2_confidence = "LOW"
+        else:
+            tr2_confidence = "LOW"
+        emit_transition(
+            "TR2",
+            tr2_active,
+            tr2_confidence,
+            "WALLET",
+            top_seller_wallet,
+            "",
+            "SINGLE POWERFUL WALLET",
+            "One wallet is driving an outsized share of recent sells.",
+            "Sustained sells from a dominant wallet can trigger cascade exits from followers and bots.",
+            f"TR2:{top_seller_wallet}"
+        )
+
+        # TR3 — Coordinated Group Spike
+        tr3_condition = (
+            total_vol >= 300
+            and best_group_wallets_count >= 4
+            and best_group_share >= 0.60
+        )
+        tr3_clear = best_group_share < 0.45 or best_group_wallets_count < 3
+        tr3_prev_active = self.v3_state["TR3"]["active"]
+        tr3_active = (not tr3_clear) if tr3_prev_active else tr3_condition
+        if tr3_active:
+            if best_group_share >= 0.75:
+                tr3_confidence = "HIGH"
+            elif best_group_share >= 0.65:
+                tr3_confidence = "MEDIUM"
+            else:
+                tr3_confidence = "LOW"
+        else:
+            tr3_confidence = "LOW"
+        emit_transition(
+            "TR3",
+            tr3_active,
+            tr3_confidence,
+            "GROUP",
+            best_group_id,
+            ",".join(best_group_wallets),
+            "BUNDLE (COORDINATED WALLET GROUP)",
+            "A recently created wallet cohort is acting as a coordinated volume block.",
+            "Coordinated groups can rotate or exit together, creating sudden dumps and follow-on selling.",
+            f"TR3:{best_group_id}"
+        )
+
+        # TR6 — Bot Amplifier Swarm
+        tr6_condition = (
+            total_vol >= 250
+            and micro_wallet_count >= 8
+            and micro_trade_count_total >= 20
+        )
+        tr6_clear = micro_wallet_count < 6 or micro_trade_count_total < 15
+        tr6_prev_active = self.v3_state["TR6"]["active"]
+        tr6_active = (not tr6_clear) if tr6_prev_active else tr6_condition
+        if tr6_active:
+            if micro_wallet_count >= 15 or micro_trade_count_total >= 35:
+                tr6_confidence = "HIGH"
+            elif micro_wallet_count >= 11 or micro_trade_count_total >= 28:
+                tr6_confidence = "MEDIUM"
+            else:
+                tr6_confidence = "LOW"
+        else:
+            tr6_confidence = "LOW"
+        emit_transition(
+            "TR6",
+            tr6_active,
+            tr6_confidence,
+            "GROUP",
+            "MICRO_SWARM",
+            micro_subject_members,
+            "BOT / AMPLIFIER PRESENCE",
+            "Many small wallets are firing repeated micro-trades in a short window.",
+            "Amplifier swarms can accelerate moves and then flip, creating fast cascade exits.",
+            "TR6:MICRO_SWARM"
+        )
     
     def mark_minute_complete(self, minute_ts):
         """Mark a minute as complete and add to sorted list"""
@@ -943,6 +1233,9 @@ class PandaScanner:
                     self.write_event(ts, wallet, side, token_amt, sig)
                     self.update_minute_bar(ts, wallet, side, token_amt)
                     self.write_event_jsonl(ts_iso, minute_bucket, wallet, side, token_amt, sig, is_new_wallet)
+                    self._v3_window_add(ts, wallet, side, token_amt)
+                    self._v3_window_evict(ts)
+                    self._v3_eval_and_emit(ts_iso, ts)
                     delta_emits = self.delta_engine.on_event({
                         "ts": ts,
                         "wallet": wallet,
