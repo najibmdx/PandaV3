@@ -12,9 +12,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pandascan_u import V3_EVIDENCE_REQUIRED_KEYS
-
-
 class Mode(str, Enum):
     STRICT = "STRICT"
     PERMISSIVE = "PERMISSIVE"
@@ -24,6 +21,19 @@ class Mode(str, Enum):
 class TrustLevel(str, Enum):
     RAW = "RAW"
     VALIDATED_IN_RUN = "VALIDATED_IN_RUN"
+
+
+V3_EVIDENCE_REQUIRED_KEYS = [
+    "ts_iso",
+    "trigger",
+    "active",
+    "confidence",
+    "subject_type",
+    "subject_id",
+    "window_seconds",
+    "metrics",
+    "reason",
+]
 
 
 ALERTS_HEADER = [
@@ -135,8 +145,10 @@ def process_evidence(
     with open(path, "r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             counters.evidence_total_lines += 1
-            counters.evidence_total_records += 1
             raw_line = line.rstrip("\n")
+            if not raw_line.strip():
+                continue
+            counters.evidence_total_records += 1
             rec_id = record_id(path, line_number)
             try:
                 obj = json.loads(raw_line)
@@ -200,7 +212,10 @@ def parse_alerts_header(
 ) -> bool:
     counters.alerts_total_lines += 1
     rec_id = record_id(path, line_number)
-    columns = line.rstrip("\n").split("\t")
+    raw_line = line.rstrip("\n")
+    if not raw_line.strip():
+        return True
+    columns = raw_line.split("\t")
     if columns != ALERTS_HEADER:
         reason = "header_mismatch"
         handle_error(
@@ -216,11 +231,11 @@ def parse_alerts_header(
                 "_error": reason,
                 "_record_id": rec_id,
                 "source": "alerts",
-                "raw": line.rstrip("\n"),
+                "raw": raw_line,
             },
             increment_invalid="alerts",
         )
-        return False
+        return mode != Mode.STRICT
     return True
 
 
@@ -237,9 +252,11 @@ def process_alerts(
 ) -> None:
     with open(path, "r", encoding="utf-8") as handle:
         header_checked = False
+        header_line_consumed = False
         for line_number, line in enumerate(handle, start=1):
             if not header_checked:
                 header_checked = True
+                header_line_consumed = True
                 if not parse_alerts_header(
                     path,
                     line,
@@ -251,12 +268,17 @@ def process_alerts(
                     audit_handle,
                 ):
                     continue
-                continue
+                raw_line = line.rstrip("\n")
+                if raw_line.split("\t") == ALERTS_HEADER:
+                    continue
 
-            counters.alerts_total_lines += 1
-            counters.alerts_total_records += 1
+            if not (header_line_consumed and line_number == 1):
+                counters.alerts_total_lines += 1
             rec_id = record_id(path, line_number)
             row = line.rstrip("\n")
+            if not row.strip():
+                continue
+            counters.alerts_total_records += 1
             columns = row.split("\t")
             if len(columns) != len(ALERTS_HEADER):
                 reason = f"column_count_mismatch:{len(columns)}"
