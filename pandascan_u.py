@@ -111,6 +111,13 @@ class PandaScanner:
         self.legacy_outbox = deque()
         self.legacy_next_emit_ts = 0.0
         self._stop = False
+
+    def _print(self, *args, **kwargs):
+        file = kwargs.get("file", sys.stdout)
+        if self.delta_only and file is sys.stdout:
+            return
+        print(*args, **kwargs)
+
         
     def init_files(self, fresh):
         """Initialize output files with headers"""
@@ -217,7 +224,7 @@ class PandaScanner:
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
-            print(f"ERROR fetching page: {e}")
+            self._print(f"ERROR fetching page: {e}", file=sys.stderr)
             return None
 
     def get_fee_payer(self, tx):
@@ -1216,12 +1223,12 @@ class PandaScanner:
         self.attach_epoch = int(time.time())
         self.attach_ts = datetime.fromtimestamp(self.attach_epoch, tz=SGT)
         self._write_meta(self.attach_ts.isoformat())
-        print(f"=== PANDA LIVE SCANNER (SPEC v2.0) ===")
-        print(f"Mint: {self.mint}")
-        print(f"Started: {self.attach_ts.strftime('%H:%M:%S')}")
-        print(f"Attach (SGT): {self.attach_ts.isoformat()}")
-        print(f"🟢 Attached - watching for signals...")
-        print()
+        self._print(f"=== PANDA LIVE SCANNER (SPEC v2.0) ===")
+        self._print(f"Mint: {self.mint}")
+        self._print(f"Started: {self.attach_ts.strftime('%H:%M:%S')}")
+        self._print(f"Attach (SGT): {self.attach_ts.isoformat()}")
+        self._print(f"🟢 Attached - watching for signals...")
+        self._print()
         
         last_seen_sig = None
         poll_count = 0
@@ -1328,7 +1335,7 @@ class PandaScanner:
                             self.rt_last_minute_emitted = self.current_minute
 
             if self.legacy_outbox and now >= self.legacy_next_emit_ts:
-                print(self.legacy_outbox.popleft(), flush=True)
+                self._print(self.legacy_outbox.popleft(), flush=True)
                 self.legacy_next_emit_ts = now + LEGACY_EMIT_INTERVAL_SEC
 
             if now - last_heartbeat > 60:
@@ -1400,7 +1407,7 @@ class PandaScanner:
         for emit in delta_emits:
             lines = self._format_delta_emit(emit)
             for line in lines:
-                print(line)
+                self._print(line)
                 self.delta_feed_file.write(line + "\n")
 
         event_minute = datetime.fromtimestamp(ts, tz=SGT).replace(second=0, microsecond=0).isoformat()
@@ -1515,7 +1522,7 @@ class PandaScanner:
                         "sig": sig
                     })
         else:
-            print(f"ERROR: replay input missing {self.mint}.events.jsonl or {self.mint}.events.csv in {replay_dir}")
+            self._print(f"ERROR: replay input missing {self.mint}.events.jsonl or {self.mint}.events.csv in {replay_dir}", file=sys.stderr)
             return []
 
         events.sort(key=lambda item: (item["ts"], item["sig"]))
@@ -1536,7 +1543,7 @@ def main():
     if not args.replay_in:
         helius_key = os.getenv('HELIUS_API_KEY')
         if not helius_key:
-            print("ERROR: HELIUS_API_KEY environment variable not set")
+            sys.stderr.write("ERROR: HELIUS_API_KEY environment variable not set\n")
             sys.exit(1)
 
     scanner = PandaScanner(args.mint, args.outdir, helius_key or "", delta_only=args.delta_only == 1, replay_mode=bool(args.replay_in))
@@ -1563,10 +1570,13 @@ def main():
             pass
         drained = 0
         while scanner.legacy_outbox and drained < 10:
-            print(scanner.legacy_outbox.popleft(), flush=True)
+            scanner._print(scanner.legacy_outbox.popleft(), flush=True)
             drained += 1
         sys.stdout.flush()
-        print("🛑 Stopped - graceful exit.")
+        if scanner.delta_only:
+            sys.stdout.write("Stopped - graceful exit.\n")
+        else:
+            sys.stdout.write("🛑 Stopped - graceful exit.\n")
 
 
 if __name__ == '__main__':
