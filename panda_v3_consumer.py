@@ -257,7 +257,7 @@ def process_alerts(
             if not header_checked:
                 header_checked = True
                 header_line_consumed = True
-                if not parse_alerts_header(
+                parse_alerts_header(
                     path,
                     line,
                     line_number,
@@ -266,11 +266,8 @@ def process_alerts(
                     max_errors,
                     errors,
                     audit_handle,
-                ):
-                    continue
-                raw_line = line.rstrip("\n")
-                if raw_line.split("\t") == ALERTS_HEADER:
-                    continue
+                )
+                continue
 
             if not (header_line_consumed and line_number == 1):
                 counters.alerts_total_lines += 1
