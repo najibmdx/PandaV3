@@ -81,8 +81,10 @@ class PandaScanner:
         # File handles
         self.events_file = None
         self.alerts_file = None
+        self.v3_alerts_file = None
         self.minutes_file = None
         self.events_jsonl_file = None
+        self.v3_evidence_file = None
         self.minutes_jsonl_file = None
         self.delta_feed_file = None
         self.alerts_emitted = []
@@ -100,15 +102,18 @@ class PandaScanner:
         self.fresh = fresh
         events_path = os.path.join(self.outdir, f"{self.mint}.events.csv")
         alerts_path = os.path.join(self.outdir, f"{self.mint}.alerts.tsv")
+        # .v3.alerts.tsv
         minutes_path = os.path.join(self.outdir, f"{self.mint}.minutes.tsv")
         events_jsonl_path = os.path.join(self.outdir, f"{self.mint}.events.jsonl")
+        v3_alerts_path = os.path.join(self.outdir, f"{self.mint}.v3.alerts.tsv")
+        v3_evidence_path = os.path.join(self.outdir, f"{self.mint}.v3.evidence.jsonl")
         minutes_jsonl_path = os.path.join(self.outdir, f"{self.mint}.minutes.jsonl")
         delta_feed_path = os.path.join(self.outdir, f"{self.mint}.delta_feed.txt")
         self.meta_path = os.path.join(self.outdir, f"{self.mint}.meta.json")
         self.wallet_first_seen_path = os.path.join(self.outdir, f"{self.mint}.wallet_first_seen.tsv")
         
         if fresh:
-            for path in (events_path, alerts_path, minutes_path, events_jsonl_path, minutes_jsonl_path, delta_feed_path, self.meta_path, self.wallet_first_seen_path):
+            for path in (events_path, alerts_path, v3_alerts_path, minutes_path, events_jsonl_path, v3_evidence_path, minutes_jsonl_path, delta_feed_path, self.meta_path, self.wallet_first_seen_path):
                 if os.path.exists(path):
                     os.remove(path)
         
@@ -122,12 +127,17 @@ class PandaScanner:
         self.alerts_file = open(alerts_path, 'a', buffering=1)
         if os.path.getsize(alerts_path) == 0:
             self.alerts_file.write("ts_iso\tsignal\tseverity\tglance_text\tcontext\n")
+
+        self.v3_alerts_file = open(v3_alerts_path, 'a', buffering=1)
+        if os.path.getsize(v3_alerts_path) == 0:
+            self.v3_alerts_file.write("ts_iso\tmint\temit_type\tcategory\tconfidence\tsubject_type\tsubject_id\tsubject_members\ttrigger_type\ttrigger_id\tcorr_ids\tintel\twarning\tevidence_status\tevidence_summary\n")
         
         self.minutes_file = open(minutes_path, 'a', buffering=1)
         if os.path.getsize(minutes_path) == 0:
             self.minutes_file.write("ts_min_iso\tevents\tunique_wallets\tnew_wallets\tbuy_vol\tsell_vol\tnet_vol\tsell_buy_ratio\ttop1_share\ttop5_share\tsymmetry_share\tflip_b2s\tflip_s2b\ttop1_buy_share_1m\ttop1_buyer_wallet_1m\tactor_top1_dominant_1m\ttop1_persistent_3m\ttop1_persistent_wallet_3m\n")
         
         self.events_jsonl_file = open(events_jsonl_path, 'a', buffering=1)
+        self.v3_evidence_file = open(v3_evidence_path, 'a', buffering=1)
         self.minutes_jsonl_file = open(minutes_jsonl_path, 'a', buffering=1)
         self.delta_feed_file = open(delta_feed_path, 'a', buffering=1, encoding="utf-8", newline="\n")
     
@@ -137,10 +147,14 @@ class PandaScanner:
             self.events_file.close()
         if self.alerts_file:
             self.alerts_file.close()
+        if self.v3_alerts_file:
+            self.v3_alerts_file.close()
         if self.minutes_file:
             self.minutes_file.close()
         if self.events_jsonl_file:
             self.events_jsonl_file.close()
+        if self.v3_evidence_file:
+            self.v3_evidence_file.close()
         if self.minutes_jsonl_file:
             self.minutes_jsonl_file.close()
         if self.delta_feed_file:
