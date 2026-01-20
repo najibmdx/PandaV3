@@ -518,6 +518,8 @@ class PandaScanner:
         top_micro_wallets = [wallet for wallet, _count in top_micro_wallets[:20]]
         micro_subject_members = ",".join(sorted(top_micro_wallets))
 
+        top_seller_share = top_seller_sell_amt / max(total_vol, V3_EPS)
+
         def emit_transition(trigger_type, active_now, confidence_now, subject_type, subject_id, subject_members, category, intel, warning, trigger_id):
             prev_state = self.v3_state[trigger_type]
             prev_active = prev_state["active"]
@@ -538,6 +540,57 @@ class PandaScanner:
                     f"\t{intel}\t{warning}\tNONE\t\n"
                 )
                 self.v3_alerts_file.write(row)
+                reason_map = {
+                    "TR1": "Dominant wallet is driving a large share of volume in the window.",
+                    "TR2": "Single wallet sell pressure is disproportionately high in the window.",
+                    "TR3": "A coordinated wallet cohort is concentrating volume in the window.",
+                    "TR6": "A swarm of micro wallets is amplifying trades in the window."
+                }
+                metrics_map = {
+                    "TR1": {
+                        "total_vol": total_vol,
+                        "total_buy": total_buy,
+                        "total_sell": total_sell,
+                        "top1_share": top1_share,
+                        "top1_count": top1_count,
+                        "unique_wallets": unique_wallets
+                    },
+                    "TR2": {
+                        "total_vol": total_vol,
+                        "total_sell": total_sell,
+                        "top_seller_sell_amt": top_seller_sell_amt,
+                        "top_seller_sell_count": top_seller_sell_count,
+                        "top_seller_share": top_seller_share,
+                        "unique_wallets": unique_wallets
+                    },
+                    "TR3": {
+                        "total_vol": total_vol,
+                        "best_group_share": best_group_share,
+                        "best_group_wallets_count": best_group_wallets_count,
+                        "unique_wallets": unique_wallets
+                    },
+                    "TR6": {
+                        "total_vol": total_vol,
+                        "micro_wallet_count": micro_wallet_count,
+                        "micro_trade_count_total": micro_trade_count_total,
+                        "unique_wallets": unique_wallets
+                    }
+                }
+                try:
+                    evidence_row = {
+                        "ts_iso": ts_iso,
+                        "trigger": trigger_type,
+                        "active": active_now,
+                        "confidence": confidence_now,
+                        "subject_type": subject_type,
+                        "subject_id": subject_id,
+                        "window_seconds": V3_W_SECONDS,
+                        "metrics": metrics_map.get(trigger_type, {}),
+                        "reason": reason_map.get(trigger_type, "")
+                    }
+                    self.v3_evidence_file.write(json.dumps(evidence_row) + "\n")
+                except Exception:
+                    pass
 
             if active_now:
                 self.v3_state[trigger_type] = {
@@ -585,7 +638,6 @@ class PandaScanner:
         )
 
         # TR2 — Wallet Sell Pressure Burst
-        top_seller_share = top_seller_sell_amt / max(total_vol, V3_EPS)
         tr2_condition = (
             total_sell >= 250
             and top_seller_sell_amt >= 0.35 * total_vol
