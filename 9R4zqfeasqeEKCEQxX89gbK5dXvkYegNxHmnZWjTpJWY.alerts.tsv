@@ -1,0 +1,6 @@
+ts_iso	signal	severity	glance_text	context
+2026-01-20T03:10:15.112956+08:00	UPSIDE_IGNITION	SPARK	Fresh participation ignition	eventsK=33 newK=24 newBuyShare=100%
+2026-01-20T03:10:15.113044+08:00	REPLACEMENT_DOMINANCE	FORCE	Replacement dominates (new wallets driving buys)	newK=24 newBuyShare=100% eventsK=33
+2026-01-20T03:10:15.113090+08:00	BROADENING_CONTROL	BREAK	Participation broadening (less top-wallet dominance)	top5=71% uniqK=24 eventsK=33
+2026-01-20T03:12:14.255509+08:00	UPSIDE_IGNITION	SPARK	Fresh participation ignition	eventsK=79 newK=56 newBuyShare=100%
+2026-01-20T03:21:15.263176+08:00	WHALE_BURST_BUY	FORCE	Large concentrated buy	share=64% amt=9.2M

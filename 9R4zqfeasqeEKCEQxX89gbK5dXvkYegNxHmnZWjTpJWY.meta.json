@@ -1,0 +1,9 @@
+{
+  "mint": "9R4zqfeasqeEKCEQxX89gbK5dXvkYegNxHmnZWjTpJWY",
+  "attach_epoch": 1768849666,
+  "attach_ts_iso": "2026-01-20T03:07:46+08:00",
+  "timezone": "Asia/Singapore",
+  "script": "pandascan_u.py",
+  "fresh": 1,
+  "started_local_wallclock": "2026-01-20T03:07:46+08:00"
+}

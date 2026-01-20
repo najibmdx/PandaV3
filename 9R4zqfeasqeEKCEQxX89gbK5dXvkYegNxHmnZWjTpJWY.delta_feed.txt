@@ -1,0 +1,285 @@
+03:08:01  PRESSURE ▲▲
+      SELL/BUY: 12785399.84
+      SELL DOMINANCE EXTREME.
+03:08:01  Control ▼
+      Top1 share delta (10m): -43.87 pp
+      Ownership dispersing.
+03:08:28  Pressure ▼
+      Sell/buy: 0.18
+      Buy-led flow.
+03:08:35  Interest ▲
+      Wallets entering: 13 (10m)
+      Participation rising.
+03:10:23  PRESSURE ▲▲
+      SELL/BUY: 2.47
+      SELL DOMINANCE EXTREME.
+03:10:47  CONTROL ▲▲
+      TOP1 SHARE DELTA (2M): 3.15 PP
+      RAPID CONCENTRATION.
+03:10:59  Pressure ▲
+      Sell/buy: 1.68
+      Sell pressure building.
+03:11:08  Interest ▲▲
+      Wallets entering: 44 (10m)
+      Participation surging.
+03:11:31  PRESSURE ▲▲
+      SELL/BUY: 2.38
+      SELL DOMINANCE EXTREME.
+03:11:51  Interest ▲
+      Wallets entering: 55 (10m)
+      Participation rising.
+03:11:51  Control ▼
+      Top1 share delta (10m): -76.49 pp
+      Ownership dispersing.
+03:13:11  Pressure ▲
+      Sell/buy: 1.73
+      Sell pressure building.
+03:13:45  Pressure ▼
+      Sell/buy: 0.12
+      Buy-led flow.
+03:15:19  Interest ▲▲
+      Wallets entering: 84 (10m)
+      Participation surging.
+03:16:13  Pressure ▲
+      Sell/buy: 1.27
+      Sell pressure building.
+03:16:58  Pressure →
+      Sell/buy: 1.09
+      Flow balanced.
+03:18:12  Pressure ▼
+      Sell/buy: 0.58
+      Buy-led flow.
+03:18:12  Interest ▲
+      Wallets entering: 104 (10m)
+      Participation rising.
+03:18:37  Pressure ▲
+      Sell/buy: 1.85
+      Sell pressure building.
+03:19:11  PRESSURE ▲▲
+      SELL/BUY: 2.08
+      SELL DOMINANCE EXTREME.
+03:20:14  Pressure ▲
+      Sell/buy: 1.38
+      Sell pressure building.
+03:20:29  CONTROL ▲▲
+      TOP1 SHARE DELTA (2M): 4.93 PP
+      RAPID CONCENTRATION.
+03:20:47  Pressure ▼
+      Sell/buy: 0.31
+      Buy-led flow.
+03:22:56  PRESSURE ▲▲
+      SELL/BUY: 2.64
+      SELL DOMINANCE EXTREME.
+03:23:16  CONTROL ▲
+      TOP1 SHARE DELTA (10M): 1.50 PP
+      OWNERSHIP CONCENTRATING.
+03:24:21  Pressure →
+      Sell/buy: 1.13
+      Flow balanced.
+03:24:33  PRESSURE ▲
+      SELL/BUY: 1.21
+      SELL PRESSURE BUILDING.
+03:25:11  Pressure ▲▲
+      Sell/buy: 2.95
+      Sell dominance extreme.
+03:25:11  Control →
+      Top1 share delta (10m): -0.24 pp
+      Concentration stable.
+03:27:13  CONTROL ▲
+      TOP1 SHARE DELTA (10M): 1.12 PP
+      OWNERSHIP CONCENTRATING.
+03:27:16  Pressure ▼
+      Sell/buy: 0.52
+      Buy-led flow.
+03:27:29  PRESSURE ▲
+      SELL/BUY: 1.33
+      SELL PRESSURE BUILDING.
+03:28:08  Pressure ▲▲
+      Sell/buy: 3.71
+      Sell dominance extreme.
+03:28:08  Control →
+      Top1 share delta (10m): -0.88 pp
+      Concentration stable.
+03:28:30  PRESSURE ▲
+      SELL/BUY: 1.36
+      SELL PRESSURE BUILDING.
+03:29:28  CONTROL ▲
+      TOP1 SHARE DELTA (10M): 1.13 PP
+      OWNERSHIP CONCENTRATING.
+03:29:28  Pressure →
+      Sell/buy: 1.15
+      Flow balanced.
+03:29:48  Pressure ▼
+      Sell/buy: 0.37
+      Buy-led flow.
+03:30:21  Control ▼
+      Top1 share delta (10m): -2.62 pp
+      Ownership dispersing.
+03:32:35  Pressure →
+      Sell/buy: 1.03
+      Flow balanced.
+03:33:07  Pressure ▲
+      Sell/buy: 1.55
+      Sell pressure building.
+03:33:27  Pressure →
+      Sell/buy: 1.15
+      Flow balanced.
+03:33:59  Pressure ▲
+      Sell/buy: 1.56
+      Sell pressure building.
+03:34:49  Pressure →
+      Sell/buy: 1.01
+      Flow balanced.
+03:35:14  Pressure ▼
+      Sell/buy: 0.80
+      Buy-led flow.
+03:35:57  Pressure →
+      Sell/buy: 1.09
+      Flow balanced.
+03:36:33  Pressure ▼
+      Sell/buy: 0.18
+      Buy-led flow.
+03:37:33  Interest →
+      Wallets entering: 163 (10m)
+      Participation steady.
+03:37:33  Pressure →
+      Sell/buy: 0.98
+      Flow balanced.
+03:38:16  Control →
+      Top1 share delta (10m): -0.55 pp
+      Concentration stable.
+03:38:26  Pressure ▲
+      Sell/buy: 1.89
+      Sell pressure building.
+03:38:27  PRESSURE ▲▲
+      SELL/BUY: 2.14
+      SELL DOMINANCE EXTREME.
+03:39:01  Control ▼
+      Top1 share delta (10m): -2.32 pp
+      Ownership dispersing.
+03:40:38  Pressure ▲
+      Sell/buy: 1.83
+      Sell pressure building.
+03:42:40  INTEREST ▼
+      WALLETS ENTERING: 104 (10M)
+      PARTICIPATION WEAKENING.
+03:42:57  PRESSURE ▲▲
+      SELL/BUY: 2.75
+      SELL DOMINANCE EXTREME.
+03:43:39  Pressure →
+      Sell/buy: 0.91
+      Flow balanced.
+03:43:45  CONTROL ▲▲
+      TOP1 SHARE DELTA (2M): 11.39 PP
+      RAPID CONCENTRATION.
+03:44:02  Pressure ▼
+      Sell/buy: 0.21
+      Buy-led flow.
+03:44:46  Interest →
+      Wallets entering: 110 (10m)
+      Participation steady.
+03:45:03  INTEREST ▼
+      WALLETS ENTERING: 104 (10M)
+      PARTICIPATION WEAKENING.
+03:46:58  PRESSURE ▲
+      SELL/BUY: 1.32
+      SELL PRESSURE BUILDING.
+03:47:25  Pressure ▲▲
+      Sell/buy: 2.29
+      Sell dominance extreme.
+03:48:36  Pressure ▼
+      Sell/buy: 0.66
+      Buy-led flow.
+03:48:37  CONTROL ▲
+      TOP1 SHARE DELTA (10M): 3.78 PP
+      OWNERSHIP CONCENTRATING.
+03:48:38  Interest →
+      Wallets entering: 109 (10m)
+      Participation steady.
+03:49:23  Control ▼
+      Top1 share delta (10m): -2.05 pp
+      Ownership dispersing.
+03:49:38  CONTROL ▲
+      TOP1 SHARE DELTA (10M): 3.84 PP
+      OWNERSHIP CONCENTRATING.
+03:50:12  Interest ▲
+      Wallets entering: 188 (10m)
+      Participation rising.
+03:50:45  Pressure →
+      Sell/buy: 0.90
+      Flow balanced.
+03:51:16  Pressure ▼
+      Sell/buy: 0.79
+      Buy-led flow.
+03:51:38  Pressure →
+      Sell/buy: 1.11
+      Flow balanced.
+03:51:53  PRESSURE ▲
+      SELL/BUY: 1.24
+      SELL PRESSURE BUILDING.
+03:52:26  Pressure →
+      Sell/buy: 1.09
+      Flow balanced.
+03:52:46  Control →
+      Top1 share delta (10m): 0.94 pp
+      Concentration stable.
+03:52:47  Pressure ▼
+      Sell/buy: 0.71
+      Buy-led flow.
+03:53:05  CONTROL ▲
+      TOP1 SHARE DELTA (10M): 1.01 PP
+      OWNERSHIP CONCENTRATING.
+03:53:12  Pressure →
+      Sell/buy: 0.88
+      Flow balanced.
+03:53:41  Pressure ▼
+      Sell/buy: 0.72
+      Buy-led flow.
+03:53:57  Control ▼
+      Top1 share delta (10m): -13.35 pp
+      Ownership dispersing.
+03:54:00  PRESSURE ▲
+      SELL/BUY: 1.24
+      SELL PRESSURE BUILDING.
+03:55:46  Pressure →
+      Sell/buy: 1.09
+      Flow balanced.
+03:56:21  Pressure ▼
+      Sell/buy: 0.80
+      Buy-led flow.
+03:56:51  Pressure →
+      Sell/buy: 0.89
+      Flow balanced.
+03:57:36  Pressure ▲
+      Sell/buy: 1.59
+      Sell pressure building.
+03:58:09  Pressure →
+      Sell/buy: 1.12
+      Flow balanced.
+03:58:48  Interest →
+      Wallets entering: 209 (10m)
+      Participation steady.
+03:59:14  CONTROL ▲▲
+      TOP1 SHARE DELTA (2M): 2.07 PP
+      RAPID CONCENTRATION.
+03:59:42  Pressure ▲
+      Sell/buy: 1.44
+      Sell pressure building.
+04:00:40  PRESSURE ▲▲
+      SELL/BUY: 2.16
+      SELL DOMINANCE EXTREME.
+04:00:43  Control ▼
+      Top1 share delta (10m): -2.43 pp
+      Ownership dispersing.
+04:01:00  Pressure ▲
+      Sell/buy: 1.43
+      Sell pressure building.
+04:01:28  Pressure →
+      Sell/buy: 1.11
+      Flow balanced.
+04:01:57  Pressure ▲
+      Sell/buy: 1.25
+      Sell pressure building.
+04:02:23  Pressure →
+      Sell/buy: 1.10
+      Flow balanced.
