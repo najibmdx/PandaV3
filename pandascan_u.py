@@ -46,6 +46,17 @@ EPS = 1e-9  # Small epsilon for division safety
 LEGACY_EMIT_INTERVAL_SEC = 0.6
 V3_W_SECONDS = 120
 V3_EPS = 1e-9
+V3_EVIDENCE_REQUIRED_KEYS = (
+    "ts_iso",
+    "trigger",
+    "active",
+    "confidence",
+    "subject_type",
+    "subject_id",
+    "window_seconds",
+    "metrics",
+    "reason"
+)
 
 
 class PandaScanner:
@@ -100,6 +111,7 @@ class PandaScanner:
         self.minutes_file = None
         self.events_jsonl_file = None
         self.v3_evidence_file = None
+        self.v3_evidence_path = None
         self.minutes_jsonl_file = None
         self.delta_feed_file = None
         self.alerts_emitted = []
@@ -160,6 +172,7 @@ class PandaScanner:
         
         self.events_jsonl_file = open(events_jsonl_path, 'a', buffering=1)
         self.v3_evidence_file = open(v3_evidence_path, 'a', buffering=1)
+        self.v3_evidence_path = v3_evidence_path
         self.minutes_jsonl_file = open(minutes_jsonl_path, 'a', buffering=1)
         self.delta_feed_file = open(delta_feed_path, 'a', buffering=1, encoding="utf-8", newline="\n")
     
@@ -184,6 +197,11 @@ class PandaScanner:
 
     def stop(self):
         self._stop = True
+
+    def validate_v3_evidence(self):
+        if not self.v3_evidence_path:
+            raise RuntimeError("v3 evidence path not set")
+        validate_v3_evidence_jsonl(self.v3_evidence_path)
 
     def load_wallet_first_seen(self):
         """Load persistent wallet first-seen data from TSV (append-only)."""
@@ -1529,6 +1547,23 @@ class PandaScanner:
         return events
 
 
+def validate_v3_evidence_jsonl(file_path):
+    with open(file_path, "r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"{file_path} line {line_number}: invalid json") from exc
+            if not isinstance(payload, dict):
+                raise RuntimeError(f"{file_path} line {line_number}: expected object")
+            for key in V3_EVIDENCE_REQUIRED_KEYS:
+                if key not in payload:
+                    raise RuntimeError(f"{file_path} line {line_number}: missing key '{key}'")
+
+
 def main():
     parser = argparse.ArgumentParser(description='PANDA - Wallet Intelligence Scanner (Spec v2.0)')
     parser.add_argument('--mint', required=True, help='Token mint address (CA)')
@@ -1536,6 +1571,7 @@ def main():
     parser.add_argument('--fresh', type=int, required=True, choices=[0, 1], help='1=new files required')
     parser.add_argument('--delta-only', type=int, default=0, choices=[0, 1], help='1=suppress legacy stdout')
     parser.add_argument('--replay-in', dest='replay_in', default=None, help='Replay input dir for <mint>.events.jsonl or <mint>.events.csv')
+    parser.add_argument('--validate-v3-evidence', dest='validate_v3_evidence', type=int, choices=[0, 1], default=None, help='Replay-only v3 evidence JSONL validation (1=on, 0=off)')
     
     args = parser.parse_args()
 
@@ -1546,6 +1582,14 @@ def main():
             sys.stderr.write("ERROR: HELIUS_API_KEY environment variable not set\n")
             sys.exit(1)
 
+    if args.replay_in:
+        if args.validate_v3_evidence is None:
+            validate_v3_evidence = 1
+        else:
+            validate_v3_evidence = 1 if args.validate_v3_evidence == 1 else 0
+    else:
+        validate_v3_evidence = 0
+
     scanner = PandaScanner(args.mint, args.outdir, helius_key or "", delta_only=args.delta_only == 1, replay_mode=bool(args.replay_in))
 
     def handle_signal(_signum, _frame):
@@ -1554,6 +1598,7 @@ def main():
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
+    scan_error = None
     try:
         scanner.init_files(args.fresh == 1)
         try:
@@ -1563,11 +1608,15 @@ def main():
                 scanner.scan()
         except KeyboardInterrupt:
             scanner.stop()
+        except Exception as exc:
+            scan_error = exc
     finally:
         try:
             scanner.close_files()
         except Exception:
             pass
+        if scan_error is None and args.replay_in and validate_v3_evidence:
+            scanner.validate_v3_evidence()
         drained = 0
         while scanner.legacy_outbox and drained < 10:
             scanner._print(scanner.legacy_outbox.popleft(), flush=True)
@@ -1577,6 +1626,8 @@ def main():
             sys.stdout.write("Stopped - graceful exit.\n")
         else:
             sys.stdout.write("🛑 Stopped - graceful exit.\n")
+        if scan_error is not None:
+            raise scan_error
 
 
 if __name__ == '__main__':
