@@ -51,14 +51,17 @@ V3_EPS = 1e-9
 class PandaScanner:
     """Stateless wallet intelligence scanner for a single mint"""
     
-    def __init__(self, mint, outdir, helius_key, delta_only=False):
+    def __init__(self, mint, outdir, helius_key, delta_only=False, replay_mode=False):
         self.mint = mint
         self.outdir = outdir
         self.helius_key = helius_key
         self.delta_only = delta_only
+        self.replay_mode = replay_mode
         self.helius_url = f"https://api.helius.xyz/v0/addresses/{mint}/transactions"
         self.attach_epoch = None
         self.attach_ts = None
+        self.replay_current_ts = None
+        self.current_minute = None
         
         # In-memory state (per-run only)
         self.seen_sigs = set()
@@ -310,7 +313,7 @@ class PandaScanner:
     
     def emit_alert(self, signal, severity, glance_text, context_dict):
         """Emit a sparse alert"""
-        ts_iso = datetime.now(SGT).isoformat()
+        ts_iso = datetime.fromtimestamp(self._now_epoch(), tz=SGT).isoformat()
         context = ' '.join(f"{k}={v}" for k, v in context_dict.items())
         self.alerts_file.write(f"{ts_iso}\t{signal}\t{severity}\t{glance_text}\t{context}\n")
         
@@ -332,7 +335,7 @@ class PandaScanner:
             'WHALE_BURST_SELL': '🐋'
         }
         emoji = emoji_map.get(signal, '⚪')
-        time_str = datetime.now(SGT).strftime('%H:%M:%S')
+        time_str = datetime.fromtimestamp(self._now_epoch(), tz=SGT).strftime('%H:%M:%S')
         self.legacy_outbox.append(f"{emoji} {signal:20s} {time_str}  {glance_text}")
         self.alerts_emitted.append((time_str, signal))
 
@@ -1007,7 +1010,7 @@ class PandaScanner:
         if not K or not B:
             return
 
-        now = time.time()
+        now = self._now_epoch()
 
         b_minutes = self.completed_minutes[-B_MINUTES:]
         b_buckets = [self.minute_buckets[m] for m in b_minutes]
@@ -1209,18 +1212,10 @@ class PandaScanner:
     
     def scan(self):
         """Main scan loop - LIVE FORWARD POLLING"""
+        self.replay_mode = False
         self.attach_epoch = int(time.time())
         self.attach_ts = datetime.fromtimestamp(self.attach_epoch, tz=SGT)
-        with open(self.meta_path, 'w') as handle:
-            json.dump({
-                "mint": self.mint,
-                "attach_epoch": self.attach_epoch,
-                "attach_ts_iso": self.attach_ts.isoformat(),
-                "timezone": "Asia/Singapore",
-                "script": "pandascan_u.py",
-                "fresh": 1 if self.fresh else 0,
-                "started_local_wallclock": self.attach_ts.isoformat()
-            }, handle, ensure_ascii=False, indent=2)
+        self._write_meta(self.attach_ts.isoformat())
         print(f"=== PANDA LIVE SCANNER (SPEC v2.0) ===")
         print(f"Mint: {self.mint}")
         print(f"Started: {self.attach_ts.strftime('%H:%M:%S')}")
@@ -1233,7 +1228,7 @@ class PandaScanner:
         events_saved = 0
         empty_poll_streak = 0
         last_heartbeat = time.time()
-        current_minute = None
+        self.current_minute = None
         
         while True:
             if self._stop:
@@ -1279,95 +1274,10 @@ class PandaScanner:
 
                 # Emit ALL qualifying actor-based events in this transaction
                 for ts, wallet, side, token_amt, _sig in tx_events:
-                    is_new_wallet = wallet not in self.wallet_first_seen
-                    ts_iso = datetime.fromtimestamp(ts, tz=SGT).isoformat()
-                    minute_bucket = datetime.fromtimestamp(ts, tz=SGT).replace(second=0, microsecond=0).isoformat()
-                    self.write_event(ts, wallet, side, token_amt, sig)
-                    self.update_minute_bar(ts, wallet, side, token_amt)
-                    self.write_event_jsonl(ts_iso, minute_bucket, wallet, side, token_amt, sig, is_new_wallet)
-                    self._v3_window_add(ts, wallet, side, token_amt)
-                    self._v3_window_evict(ts)
-                    self._v3_eval_and_emit(ts_iso, ts)
-                    delta_emits = self.delta_engine.on_event({
-                        "ts": ts,
-                        "wallet": wallet,
-                        "side": side,
-                        "amount": token_amt,
-                        "is_new_wallet": is_new_wallet
-                    })
-                    for emit in delta_emits:
-                        lines = self._format_delta_emit(emit)
-                        for line in lines:
-                            print(line)
-                            self.delta_feed_file.write(line + "\n")
-
+                    self._process_event(ts, wallet, side, token_amt, sig)
                     poll_events += 1
                     events_saved += 1
                     last_seen_sig = sig
-
-                    # Check if we've moved to a new minute
-                    event_minute = datetime.fromtimestamp(ts, tz=SGT).replace(second=0, microsecond=0).isoformat()
-                    if current_minute is None:
-                        current_minute = event_minute
-                    elif event_minute > current_minute:
-                        # Mark previous minute as complete and write it
-                        self.mark_minute_complete(current_minute)
-                        self.write_minute_bar(current_minute)
-
-                        minute_bucket = self.minute_buckets[current_minute]
-                        buy_vol = minute_bucket['buy_vol']
-                        sell_vol = minute_bucket['sell_vol']
-                        buy_wallets = len([w for w, v in minute_bucket['wallet_buy_vol'].items() if v > 0])
-                        sell_wallets = len([w for w, v in minute_bucket['wallet_sell_vol'].items() if v > 0])
-                        if sell_vol > 0 and minute_bucket['wallet_sell_vol']:
-                            top1_sell_share = max(minute_bucket['wallet_sell_vol'].values()) / max(sell_vol, EPS)
-                        else:
-                            top1_sell_share = None
-
-                        b_metrics = self.get_B_metrics()
-                        whale_threshold = b_metrics['p95_wallet_vol_1m_B'] if b_metrics else 0
-                        if whale_threshold:
-                            whale_sells_count = len([w for w, v in minute_bucket['wallet_sell_vol'].items() if v >= whale_threshold])
-                        else:
-                            whale_sells_count = None
-                        panda_d_input = {
-                            "ts_min_iso": current_minute,
-                            "buy_notional_1m": buy_vol,
-                            "sell_notional_1m": sell_vol,
-                            "buy_wallets": buy_wallets,
-                            "sell_wallets": sell_wallets,
-                            "top1_sell_share": top1_sell_share,
-                            "whale_sells_count": whale_sells_count
-                        }
-                        panda_d_output = self.panda_d.process_minute(panda_d_input)
-                        if panda_d_output:
-                            self.panda_d_outputs[current_minute] = panda_d_output
-
-                        contexts = build_phase2_contexts(current_minute, self.minute_buckets[current_minute], whale_threshold)
-                        context_printed = False
-                        buy_context = next((c for c in contexts if c.side == "BUY"), None)
-                        sell_context = next((c for c in contexts if c.side == "SELL"), None)
-                        if buy_context:
-                            context_time = datetime.fromisoformat(buy_context.minute_ts).strftime('%H:%M:%S')
-                            self.legacy_outbox.append(f"[CTX]   {context_time} BUY  | wallets={buy_context.wallets} | whales={buy_context.whales} | crowd={buy_context.crowd}")
-                            context_printed = True
-                        if sell_context:
-                            context_time = datetime.fromisoformat(sell_context.minute_ts).strftime('%H:%M:%S')
-                            self.legacy_outbox.append(f"[CTX]   {context_time} SELL | wallets={sell_context.wallets} | whales={sell_context.whales} | crowd={sell_context.crowd}")
-                            context_printed = True
-                        if context_printed:
-                            narrative = sell_context.description if sell_context else (buy_context.description if buy_context else None)
-                            if narrative:
-                                self.legacy_outbox.append(f"        {narrative}")
-
-                        # Analyze signals after minute completion
-                        self.alerts_emitted = []
-                        self.analyze_signals()
-                        if context_printed and self.alerts_emitted:
-                            for alert_time, alert_name in self.alerts_emitted:
-                                self.legacy_outbox.append(f"[ALERT] {alert_time} {alert_name}")
-
-                        current_minute = event_minute
 
                 # Mark signature seen AFTER processing the entire transaction
                 self.seen_sigs.add(sig)
@@ -1386,14 +1296,14 @@ class PandaScanner:
             now = time.time()
             if now - self.rt_last_tick >= POLL_INTERVAL_SECONDS:
                 self.rt_last_tick = now
-                if current_minute and current_minute in self.minute_buckets:
+                if self.current_minute and self.current_minute in self.minute_buckets:
                     b_metrics = self.get_B_metrics()
                     K = self.get_K_metrics()
                     if b_metrics and K:
                         b_minutes = self.completed_minutes[-B_MINUTES:]
                         b_buckets = [self.minute_buckets[m] for m in b_minutes]
                         baselines = self._compute_baseline_thresholds(b_buckets)
-                        open_bucket = self.minute_buckets[current_minute]
+                        open_bucket = self.minute_buckets[self.current_minute]
                         latest_total_vol = open_bucket['buy_vol'] + open_bucket['sell_vol']
                         latest_events_1m = open_bucket['events']
                         latest_new_wallets_1m = len(open_bucket['new_wallets'])
@@ -1411,11 +1321,11 @@ class PandaScanner:
                             baselines['p80_new_wallets_1m_B'],
                             baselines['p70_new_buy_share_1m_B']
                         )
-                        if ignition_rt and self.rt_last_minute_emitted != current_minute:
+                        if ignition_rt and self.rt_last_minute_emitted != self.current_minute:
                             time_str = datetime.now(SGT).strftime('%H:%M:%S')
                             self.legacy_outbox.append(f"✨ [RT] UPSIDE_IGNITION   {time_str}  Fresh participation ignition (provisional)")
                             self.legacy_outbox.append(f"[RT]   {time_str} UPSIDE_IGNITION")
-                            self.rt_last_minute_emitted = current_minute
+                            self.rt_last_minute_emitted = self.current_minute
 
             if self.legacy_outbox and now >= self.legacy_next_emit_ts:
                 print(self.legacy_outbox.popleft(), flush=True)
@@ -1428,12 +1338,188 @@ class PandaScanner:
             time.sleep(POLL_INTERVAL_SECONDS)
         
         # Final minute completion and analysis
-        if current_minute is not None:
-            self.mark_minute_complete(current_minute)
-            self.write_minute_bar(current_minute)
-            self.analyze_signals()
+        if self.current_minute is not None:
+            self._finalize_minute(self.current_minute)
         
         self.legacy_outbox.append(f"\n📊 Stream summary: {events_saved} events, {len(self.completed_minutes)} minutes, {poll_count} polls")
+
+    def scan_replay(self, replay_dir):
+        """Replay scanner from deterministic event logs."""
+        self.replay_mode = True
+        events = self._load_replay_events(replay_dir)
+        if events:
+            self.attach_epoch = events[0]["ts"]
+        else:
+            self.attach_epoch = 0
+        self.attach_ts = datetime.fromtimestamp(self.attach_epoch, tz=SGT)
+        self._write_meta(self.attach_ts.isoformat())
+        self.current_minute = None
+        events_saved = 0
+        for event in events:
+            self._process_event(event["ts"], event["wallet"], event["side"], event["amount"], event["sig"])
+            events_saved += 1
+        if self.current_minute is not None:
+            self._finalize_minute(self.current_minute)
+        self.legacy_outbox.append(f"\n📊 Replay summary: {events_saved} events, {len(self.completed_minutes)} minutes")
+
+    def _write_meta(self, started_local_wallclock):
+        with open(self.meta_path, 'w') as handle:
+            json.dump({
+                "mint": self.mint,
+                "attach_epoch": self.attach_epoch,
+                "attach_ts_iso": self.attach_ts.isoformat(),
+                "timezone": "Asia/Singapore",
+                "script": "pandascan_u.py",
+                "fresh": 1 if self.fresh else 0,
+                "started_local_wallclock": started_local_wallclock
+            }, handle, ensure_ascii=False, indent=2)
+
+    def _now_epoch(self):
+        if self.replay_mode and self.replay_current_ts is not None:
+            return self.replay_current_ts
+        return time.time()
+
+    def _process_event(self, ts, wallet, side, token_amt, sig):
+        self.replay_current_ts = ts
+        is_new_wallet = wallet not in self.wallet_first_seen
+        ts_iso = datetime.fromtimestamp(ts, tz=SGT).isoformat()
+        minute_bucket = datetime.fromtimestamp(ts, tz=SGT).replace(second=0, microsecond=0).isoformat()
+        self.write_event(ts, wallet, side, token_amt, sig)
+        self.update_minute_bar(ts, wallet, side, token_amt)
+        self.write_event_jsonl(ts_iso, minute_bucket, wallet, side, token_amt, sig, is_new_wallet)
+        self._v3_window_add(ts, wallet, side, token_amt)
+        self._v3_window_evict(ts)
+        self._v3_eval_and_emit(ts_iso, ts)
+        delta_emits = self.delta_engine.on_event({
+            "ts": ts,
+            "wallet": wallet,
+            "side": side,
+            "amount": token_amt,
+            "is_new_wallet": is_new_wallet
+        })
+        for emit in delta_emits:
+            lines = self._format_delta_emit(emit)
+            for line in lines:
+                print(line)
+                self.delta_feed_file.write(line + "\n")
+
+        event_minute = datetime.fromtimestamp(ts, tz=SGT).replace(second=0, microsecond=0).isoformat()
+        if self.current_minute is None:
+            self.current_minute = event_minute
+        elif event_minute > self.current_minute:
+            self._finalize_minute(self.current_minute)
+            self.current_minute = event_minute
+
+    def _finalize_minute(self, minute_key):
+        self.mark_minute_complete(minute_key)
+        self.write_minute_bar(minute_key)
+
+        minute_bucket = self.minute_buckets[minute_key]
+        buy_vol = minute_bucket['buy_vol']
+        sell_vol = minute_bucket['sell_vol']
+        buy_wallets = len([w for w, v in minute_bucket['wallet_buy_vol'].items() if v > 0])
+        sell_wallets = len([w for w, v in minute_bucket['wallet_sell_vol'].items() if v > 0])
+        if sell_vol > 0 and minute_bucket['wallet_sell_vol']:
+            top1_sell_share = max(minute_bucket['wallet_sell_vol'].values()) / max(sell_vol, EPS)
+        else:
+            top1_sell_share = None
+
+        b_metrics = self.get_B_metrics()
+        whale_threshold = b_metrics['p95_wallet_vol_1m_B'] if b_metrics else 0
+        if whale_threshold:
+            whale_sells_count = len([w for w, v in minute_bucket['wallet_sell_vol'].items() if v >= whale_threshold])
+        else:
+            whale_sells_count = None
+        panda_d_input = {
+            "ts_min_iso": minute_key,
+            "buy_notional_1m": buy_vol,
+            "sell_notional_1m": sell_vol,
+            "buy_wallets": buy_wallets,
+            "sell_wallets": sell_wallets,
+            "top1_sell_share": top1_sell_share,
+            "whale_sells_count": whale_sells_count
+        }
+        panda_d_output = self.panda_d.process_minute(panda_d_input)
+        if panda_d_output:
+            self.panda_d_outputs[minute_key] = panda_d_output
+
+        contexts = build_phase2_contexts(minute_key, self.minute_buckets[minute_key], whale_threshold)
+        context_printed = False
+        buy_context = next((c for c in contexts if c.side == "BUY"), None)
+        sell_context = next((c for c in contexts if c.side == "SELL"), None)
+        if buy_context:
+            context_time = datetime.fromisoformat(buy_context.minute_ts).strftime('%H:%M:%S')
+            self.legacy_outbox.append(f"[CTX]   {context_time} BUY  | wallets={buy_context.wallets} | whales={buy_context.whales} | crowd={buy_context.crowd}")
+            context_printed = True
+        if sell_context:
+            context_time = datetime.fromisoformat(sell_context.minute_ts).strftime('%H:%M:%S')
+            self.legacy_outbox.append(f"[CTX]   {context_time} SELL | wallets={sell_context.wallets} | whales={sell_context.whales} | crowd={sell_context.crowd}")
+            context_printed = True
+        if context_printed:
+            narrative = sell_context.description if sell_context else (buy_context.description if buy_context else None)
+            if narrative:
+                self.legacy_outbox.append(f"        {narrative}")
+
+        self.alerts_emitted = []
+        self.analyze_signals()
+        if context_printed and self.alerts_emitted:
+            for alert_time, alert_name in self.alerts_emitted:
+                self.legacy_outbox.append(f"[ALERT] {alert_time} {alert_name}")
+
+    def _load_replay_events(self, replay_dir):
+        events = []
+        jsonl_path = os.path.join(replay_dir, f"{self.mint}.events.jsonl")
+        csv_path = os.path.join(replay_dir, f"{self.mint}.events.csv")
+        if os.path.exists(jsonl_path):
+            with open(jsonl_path, "r") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    payload = json.loads(line)
+                    ts_iso = payload.get("ts_iso")
+                    if not ts_iso:
+                        continue
+                    ts = int(datetime.fromisoformat(ts_iso).timestamp())
+                    wallet = payload.get("wallet", "")
+                    side = payload.get("side", "").upper()
+                    amount = float(payload.get("amount", 0))
+                    sig = payload.get("signature", "") or ""
+                    events.append({
+                        "ts": ts,
+                        "wallet": wallet,
+                        "side": side,
+                        "amount": amount,
+                        "sig": sig
+                    })
+        elif os.path.exists(csv_path):
+            import csv
+            with open(csv_path, "r") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    if not row:
+                        continue
+                    ts_raw = row.get("ts") or row.get("timestamp") or ""
+                    if ts_raw == "":
+                        continue
+                    ts = int(float(ts_raw))
+                    wallet = row.get("wallet", "")
+                    side = row.get("side", "").upper()
+                    amount = float(row.get("token_amt", 0) or 0)
+                    sig = row.get("sig", "") or ""
+                    events.append({
+                        "ts": ts,
+                        "wallet": wallet,
+                        "side": side,
+                        "amount": amount,
+                        "sig": sig
+                    })
+        else:
+            print(f"ERROR: replay input missing {self.mint}.events.jsonl or {self.mint}.events.csv in {replay_dir}")
+            return []
+
+        events.sort(key=lambda item: (item["ts"], item["sig"]))
+        return events
 
 
 def main():
@@ -1442,15 +1528,18 @@ def main():
     parser.add_argument('--outdir', required=True, help='Output directory')
     parser.add_argument('--fresh', type=int, required=True, choices=[0, 1], help='1=new files required')
     parser.add_argument('--delta-only', type=int, default=0, choices=[0, 1], help='1=suppress legacy stdout')
+    parser.add_argument('--replay-in', dest='replay_in', default=None, help='Replay input dir for <mint>.events.jsonl or <mint>.events.csv')
     
     args = parser.parse_args()
-    
-    helius_key = os.getenv('HELIUS_API_KEY')
-    if not helius_key:
-        print("ERROR: HELIUS_API_KEY environment variable not set")
-        sys.exit(1)
-    
-    scanner = PandaScanner(args.mint, args.outdir, helius_key, delta_only=args.delta_only == 1)
+
+    helius_key = None
+    if not args.replay_in:
+        helius_key = os.getenv('HELIUS_API_KEY')
+        if not helius_key:
+            print("ERROR: HELIUS_API_KEY environment variable not set")
+            sys.exit(1)
+
+    scanner = PandaScanner(args.mint, args.outdir, helius_key or "", delta_only=args.delta_only == 1, replay_mode=bool(args.replay_in))
 
     def handle_signal(_signum, _frame):
         scanner.stop()
@@ -1461,7 +1550,10 @@ def main():
     try:
         scanner.init_files(args.fresh == 1)
         try:
-            scanner.scan()
+            if args.replay_in:
+                scanner.scan_replay(args.replay_in)
+            else:
+                scanner.scan()
         except KeyboardInterrupt:
             scanner.stop()
     finally:
