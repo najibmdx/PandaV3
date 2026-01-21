@@ -47,6 +47,13 @@ EPS = 1e-9  # Small epsilon for division safety
 LEGACY_EMIT_INTERVAL_SEC = 0.6
 V3_W_SECONDS = 120
 V3_EPS = 1e-9
+V3_SEMANTIC_PERSISTENCE_REQUIRED = 3
+V3_SEMANTIC_FORGIVENESS = 1
+V3_SEMANTIC_CORE_WINDOW = 4
+V3_SEMANTIC_CORE_REQUIRED_APPEARANCES = 2
+V3_SEMANTIC_CORE_MIN_WALLETS = 3
+V3_SEMANTIC_BREAKDOWN_REQUIRED = 2
+V3_SEMANTIC_BREAKDOWN_FORGIVENESS = 1
 V3_EVIDENCE_REQUIRED_KEYS = (
     "ts_iso",
     "trigger",
@@ -60,116 +67,29 @@ V3_EVIDENCE_REQUIRED_KEYS = (
 )
 
 
-CONFIDENCE_RANKS = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
-
 class RadarRenderer:
     def __init__(self, max_lines=8, tone="URGENT"):
         self.max_lines = max(3, int(max_lines))
         self.tone = tone or "URGENT"
 
-    def _state_label(self, emit_type, confidence_now, prev_confidence):
-        if emit_type == "ENTER":
-            return "STRUCTURE FORMING"
-        if emit_type == "EXIT":
-            return "STRUCTURE LOST"
-        prev_rank = CONFIDENCE_RANKS.get(prev_confidence or "LOW", 0)
-        now_rank = CONFIDENCE_RANKS.get(confidence_now or "LOW", 0)
-        if now_rank >= prev_rank:
-            return "STRUCTURE STRENGTHENING"
-        return "STRUCTURE WEAKENING"
-
-    def _meaning_lines(self, trigger_type, metrics, active_now, confidence_now):
-        lines = []
-        confidence_rank = CONFIDENCE_RANKS.get(confidence_now or "LOW", 0)
-        if trigger_type == "TR1":
-            top1_share = metrics.get("top1_share", 0.0)
-            top1_count = metrics.get("top1_count", 0)
-            if top1_share >= 0.70:
-                lines.append("One wallet is seizing the wheel — flow is tightly concentrated.")
-            elif top1_share >= 0.60:
-                lines.append("One wallet is steering most of the flow right now.")
-            else:
-                lines.append("A single wallet is leading the tape in this window.")
-            if top1_count >= 4:
-                lines.append("Repeated hits from the same wallet are stacking momentum.")
-            if confidence_rank >= 2 and active_now:
-                lines.append("Crowd participation is compressing around that leader.")
-        elif trigger_type == "TR2":
-            top_seller_share = metrics.get("top_seller_share", 0.0)
-            if top_seller_share >= 0.55:
-                lines.append("Sell pressure is concentrated — one wallet is driving it.")
-            else:
-                lines.append("A single wallet is leaning hard on the sell side.")
-            if metrics.get("top_seller_sell_count", 0) >= 3:
-                lines.append("The same seller keeps tapping the tape.")
-            if confidence_rank >= 1 and active_now:
-                lines.append("Pressure is dominating the flow, not dispersed.")
-        elif trigger_type == "TR3":
-            group_share = metrics.get("best_group_share", 0.0)
-            group_count = metrics.get("best_group_wallets_count", 0)
-            if group_share >= 0.75:
-                lines.append("A cohort is moving as a block — coordination is tight.")
-            else:
-                lines.append("A wallet cohort is acting in sync in this window.")
-            if group_count >= 6:
-                lines.append("The pack is sizable and leaning together.")
-            if confidence_rank >= 1 and active_now:
-                lines.append("Flow is clustering around the same group.")
-        elif trigger_type == "TR6":
-            micro_wallet_count = metrics.get("micro_wallet_count", 0)
-            micro_trade_count_total = metrics.get("micro_trade_count_total", 0)
-            if micro_wallet_count >= 15 or micro_trade_count_total >= 35:
-                lines.append("A micro-wallet swarm is amplifying the tape fast.")
-            else:
-                lines.append("Micro wallets are firing in a tight burst.")
-            if micro_wallet_count >= 10:
-                lines.append("Swarm density is rising, not scattered.")
-            if confidence_rank >= 1 and active_now:
-                lines.append("The flow feels automated and clustered.")
-        else:
-            lines.append("Structure activity is shifting in this window.")
-        return lines
-
-    def _why_line(self, intel, warning, reason):
-        text = warning or reason or intel
-        if not text:
-            return None
-        return f"Why this matters: {text}"
-
     def render(self, plane, transition, context_line=None, provenance=None):
-        header = f"[V3 RADAR | {plane}] {self._state_label(transition['emit_type'], transition['confidence_now'], transition.get('prev_confidence'))}"
-        meaning_lines = self._meaning_lines(
-            transition["trigger_type"],
-            transition.get("metrics", {}),
-            transition.get("active_now", False),
-            transition["confidence_now"]
-        )
-        why_line = self._why_line(transition.get("intel"), transition.get("warning"), transition.get("reason"))
-        confidence_line = f"Confidence: {transition['confidence_now']}"
-        provenance_line = f"Provenance: {provenance}" if plane == "CERT" and provenance else None
+        state = transition.get("semantic_state")
+        if state == "CONFIRMED":
+            primary_line = "WALLETS MOVING TOGETHER"
+        elif state == "INVALIDATED":
+            primary_line = "WALLETS NO LONGER IN SYNC"
+        else:
+            primary_line = transition.get("primary_line")
+        if not primary_line:
+            return []
 
-        primary_line = meaning_lines[:1]
-        optional_lines = meaning_lines[1:]
-        if why_line:
-            optional_lines.append(why_line)
+        lines = ["[V3 RADAR]", primary_line]
+        confidence_value = transition.get("confidence")
+        if confidence_value:
+            lines.append(f"Confidence: {confidence_value}")
         if context_line:
-            optional_lines.append(f"Context: {context_line}")
-
-        base_lines = [header] + primary_line + optional_lines + [confidence_line]
-        if provenance_line:
-            base_lines.append(provenance_line)
-
-        if len(base_lines) <= self.max_lines:
-            return base_lines
-
-        retained_optional = list(optional_lines)
-        while retained_optional and (2 + len(retained_optional) + 1) > self.max_lines:
-            retained_optional.pop()
-
-        trimmed_lines = [header] + primary_line + retained_optional + [confidence_line]
-        if provenance_line and len(trimmed_lines) < self.max_lines:
-            trimmed_lines.append(provenance_line)
-        return trimmed_lines
+            lines.append(f"Context: {context_line}")
+        return lines[:4]
 
 
 def run_step10_gate(evidence_path, alerts_path, report_path):
@@ -277,15 +197,6 @@ class CertGateWorker(threading.Thread):
                     self.outbox.append(outbox_entry)
             else:
                 if not self._refuse_latched:
-                    reason = gate_result["reason"]
-                    with self.outbox_lock:
-                        self.outbox.append({
-                            "ts_iso": payload.get("ts_iso"),
-                            "trigger": payload.get("trigger_type"),
-                            "emit_type": "REFUSE",
-                            "direction": "FLAT",
-                            "lines": [f"[V3 RADAR | CERT] REFUSE  REASON={reason}"]
-                        })
                     self._refuse_latched = True
 
     def _run_gate(self):
@@ -335,6 +246,16 @@ class PandaScanner:
             "TR2": {"active": False, "confidence": "LOW", "subject_id": ""},
             "TR3": {"active": False, "confidence": "LOW", "subject_id": ""},
             "TR6": {"active": False, "confidence": "LOW", "subject_id": ""},
+        }
+        self.v3_semantic_state = {
+            "confirmed": False,
+            "core_set": set(),
+            "persistence_count": 0,
+            "forgiveness_remaining": 0,
+            "breakdown_count": 0,
+            "breakdown_forgiveness_remaining": V3_SEMANTIC_BREAKDOWN_FORGIVENESS,
+            "last_emitted_state": None,
+            "recent_groups": deque(maxlen=V3_SEMANTIC_CORE_WINDOW)
         }
         
         # File handles
@@ -483,19 +404,13 @@ class PandaScanner:
             context_line=payload.get("context_line")
         )
         if self.replay_mode:
-            cert_lines = self._emit_cert_radar_for_transition(payload)
             with self.v3_radar_print_lock:
                 for line in lines:
                     self._print(line)
-                if cert_lines:
-                    for line in cert_lines:
-                        self._print(line)
             return
         with self.v3_radar_print_lock:
             for line in lines:
                 self._print(line)
-        if self.v3_radar_worker:
-            self.v3_radar_worker.enqueue(payload)
 
     def _run_step10_gate_snapshot(self):
         if not self.v3_evidence_path or not self.v3_alerts_path or not self.v3_cert_report_path:
@@ -503,18 +418,6 @@ class PandaScanner:
         return run_step10_gate(self.v3_evidence_path, self.v3_alerts_path, self.v3_cert_report_path)
 
     def _emit_cert_radar_for_transition(self, payload):
-        gate_result = self._run_step10_gate_snapshot()
-        if gate_result["ok"]:
-            return self.v3_radar_renderer.render(
-                "CERT",
-                payload,
-                context_line=payload.get("context_line"),
-                provenance=gate_result["provenance"]
-            )
-        if not self.v3_cert_refuse_latched:
-            reason = gate_result["reason"]
-            self.v3_cert_refuse_latched = True
-            return [f"[V3 RADAR | CERT] REFUSE  REASON={reason}"]
         return None
 
     def _parse_ts_iso_to_epoch(self, ts_iso):
@@ -856,6 +759,137 @@ class PandaScanner:
             ):
                 self.v3_wallet_stats.pop(wallet, None)
 
+    def _v3_semantic_core_set(self):
+        core_counts = defaultdict(int)
+        for group in self.v3_semantic_state["recent_groups"]:
+            for wallet in group:
+                core_counts[wallet] += 1
+        return {
+            wallet
+            for wallet, count in core_counts.items()
+            if count >= V3_SEMANTIC_CORE_REQUIRED_APPEARANCES
+        }
+
+    def _v3_semantic_context(self, unique_wallets, top1_share):
+        descriptors = []
+        if unique_wallets >= 6:
+            descriptors.append("Participation widened")
+        elif unique_wallets <= 3:
+            descriptors.append("Participation narrowed")
+        if top1_share >= 0.60:
+            descriptors.append("Dominant wallet control")
+        elif top1_share <= 0.35 and unique_wallets >= 4:
+            descriptors.append("No dominant wallet control")
+        return ", ".join(descriptors) if descriptors else None
+
+    def _v3_semantic_confidence_confirmed(self):
+        core_size = len(self.v3_semantic_state["core_set"])
+        persistence = self.v3_semantic_state["persistence_count"]
+        forgiveness = self.v3_semantic_state["forgiveness_remaining"]
+        if (
+            core_size >= V3_SEMANTIC_CORE_MIN_WALLETS + 2
+            and persistence >= V3_SEMANTIC_PERSISTENCE_REQUIRED + 2
+            and forgiveness == V3_SEMANTIC_FORGIVENESS
+        ):
+            return "HIGH"
+        if (
+            core_size >= V3_SEMANTIC_CORE_MIN_WALLETS + 1
+            and persistence >= V3_SEMANTIC_PERSISTENCE_REQUIRED + 1
+        ):
+            return "MEDIUM"
+        return "LOW"
+
+    def _v3_semantic_confidence_breakdown(self, breakdown_count, core_overlap):
+        if breakdown_count >= V3_SEMANTIC_BREAKDOWN_REQUIRED + 1 and core_overlap == 0:
+            return "HIGH"
+        if breakdown_count >= V3_SEMANTIC_BREAKDOWN_REQUIRED:
+            return "HIGH" if core_overlap == 0 else "MEDIUM"
+        return "LOW"
+
+    def _v3_semantic_update_and_emit(self, ts_iso, total_vol, best_group_share, best_group_wallets, unique_wallets, top1_share):
+        state = self.v3_semantic_state
+        current_group = set(best_group_wallets)
+        coordination_candidate = (
+            total_vol >= 300
+            and best_group_share >= 0.60
+            and len(current_group) >= 4
+        )
+
+        if coordination_candidate:
+            state["recent_groups"].append(current_group)
+
+        state["core_set"] = self._v3_semantic_core_set()
+        core_overlap = len(state["core_set"].intersection(current_group))
+        role_stable = coordination_candidate and core_overlap >= V3_SEMANTIC_CORE_MIN_WALLETS
+
+        emit_payload = None
+
+        if not state["confirmed"]:
+            if role_stable:
+                state["persistence_count"] += 1
+                state["forgiveness_remaining"] = V3_SEMANTIC_FORGIVENESS
+            else:
+                if state["persistence_count"] > 0 and state["forgiveness_remaining"] > 0:
+                    state["forgiveness_remaining"] -= 1
+                else:
+                    state["persistence_count"] = 0
+                    state["forgiveness_remaining"] = 0
+                    state["recent_groups"].clear()
+                    state["core_set"] = set()
+                    core_overlap = 0
+                    role_stable = False
+
+            if (
+                state["persistence_count"] >= V3_SEMANTIC_PERSISTENCE_REQUIRED
+                and role_stable
+                and len(state["core_set"]) >= V3_SEMANTIC_CORE_MIN_WALLETS
+            ):
+                state["confirmed"] = True
+                state["breakdown_count"] = 0
+                state["breakdown_forgiveness_remaining"] = V3_SEMANTIC_BREAKDOWN_FORGIVENESS
+                emit_payload = {
+                    "ts_iso": ts_iso,
+                    "semantic_state": "CONFIRMED",
+                    "confidence": self._v3_semantic_confidence_confirmed(),
+                    "context_line": self._v3_semantic_context(unique_wallets, top1_share)
+                }
+        else:
+            breakdown_condition = (
+                not coordination_candidate
+                or core_overlap < V3_SEMANTIC_CORE_MIN_WALLETS
+            )
+            if breakdown_condition:
+                if state["breakdown_forgiveness_remaining"] > 0:
+                    state["breakdown_forgiveness_remaining"] -= 1
+                else:
+                    state["breakdown_count"] += 1
+            else:
+                state["breakdown_count"] = 0
+                state["breakdown_forgiveness_remaining"] = V3_SEMANTIC_BREAKDOWN_FORGIVENESS
+
+            if state["breakdown_count"] >= V3_SEMANTIC_BREAKDOWN_REQUIRED:
+                confidence = self._v3_semantic_confidence_breakdown(state["breakdown_count"], core_overlap)
+                state["confirmed"] = False
+                state["persistence_count"] = 0
+                state["forgiveness_remaining"] = 0
+                state["core_set"] = set()
+                state["recent_groups"].clear()
+                state["breakdown_count"] = 0
+                state["breakdown_forgiveness_remaining"] = V3_SEMANTIC_BREAKDOWN_FORGIVENESS
+                emit_payload = {
+                    "ts_iso": ts_iso,
+                    "semantic_state": "INVALIDATED",
+                    "confidence": confidence,
+                    "context_line": self._v3_semantic_context(unique_wallets, top1_share)
+                }
+
+        if emit_payload:
+            if state["last_emitted_state"] == emit_payload["semantic_state"]:
+                return None
+            state["last_emitted_state"] = emit_payload["semantic_state"]
+            return emit_payload
+        return None
+
     def _v3_eval_and_emit(self, ts_iso, ts_epoch):
         total_buy = 0.0
         total_sell = 0.0
@@ -1003,26 +1037,6 @@ class PandaScanner:
                 except Exception:
                     pass
 
-                radar_payload = {
-                    "ts_iso": ts_iso,
-                    "emit_type": emit_type,
-                    "trigger_type": trigger_type,
-                    "trigger_id": trigger_id,
-                    "active_now": active_now,
-                    "confidence_now": confidence_now,
-                    "prev_confidence": prev_confidence,
-                    "subject_type": subject_type,
-                    "subject_id": subject_id,
-                    "subject_members": subject_members,
-                    "category": category,
-                    "intel": intel,
-                    "warning": warning,
-                    "metrics": metrics_map.get(trigger_type, {}),
-                    "reason": reason_map.get(trigger_type, ""),
-                    "context_line": self.phase2_latest_context
-                }
-                self._emit_v3_radar(radar_payload)
-
             if active_now:
                 self.v3_state[trigger_type] = {
                     "active": True,
@@ -1161,6 +1175,17 @@ class PandaScanner:
             "Amplifier swarms can accelerate moves and then flip, creating fast cascade exits.",
             "TR6:MICRO_SWARM"
         )
+
+        semantic_payload = self._v3_semantic_update_and_emit(
+            ts_iso,
+            total_vol,
+            best_group_share,
+            best_group_wallets,
+            unique_wallets,
+            top1_share
+        )
+        if semantic_payload:
+            self._emit_v3_radar(semantic_payload)
     
     def mark_minute_complete(self, minute_ts):
         """Mark a minute as complete and add to sorted list"""
