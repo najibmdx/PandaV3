@@ -15,7 +15,6 @@ import argparse
 import sys
 import json
 import os
-import sys
 import time
 import signal
 import threading
@@ -146,27 +145,42 @@ class RadarRenderer:
             transition["confidence_now"]
         )
         why_line = self._why_line(transition.get("intel"), transition.get("warning"), transition.get("reason"))
-        core_lines = [header] + meaning_lines
-        if why_line:
-            core_lines.append(why_line)
-        if context_line:
-            core_lines.append(f"Context: {context_line}")
-        if plane == "CERT" and provenance:
-            core_lines.append(f"Provenance: {provenance}")
         confidence_line = f"Confidence: {transition['confidence_now']}"
-        core_lines = core_lines[: max(self.max_lines - 1, 1)]
-        return core_lines + [confidence_line]
+        provenance_line = f"Provenance: {provenance}" if plane == "CERT" and provenance else None
+
+        primary_line = meaning_lines[:1]
+        optional_lines = meaning_lines[1:]
+        if why_line:
+            optional_lines.append(why_line)
+        if context_line:
+            optional_lines.append(f"Context: {context_line}")
+
+        base_lines = [header] + primary_line + optional_lines + [confidence_line]
+        if provenance_line:
+            base_lines.append(provenance_line)
+
+        if len(base_lines) <= self.max_lines:
+            return base_lines
+
+        retained_optional = list(optional_lines)
+        while retained_optional and (2 + len(retained_optional) + 1) > self.max_lines:
+            retained_optional.pop()
+
+        trimmed_lines = [header] + primary_line + retained_optional + [confidence_line]
+        if provenance_line and len(trimmed_lines) < self.max_lines:
+            trimmed_lines.append(provenance_line)
+        return trimmed_lines
 
 
 class CertGateWorker(threading.Thread):
-    def __init__(self, evidence_path, alerts_path, report_path, renderer, print_fn, print_lock):
+    def __init__(self, evidence_path, alerts_path, report_path, renderer, outbox, outbox_lock):
         super().__init__(daemon=True)
         self.evidence_path = evidence_path
         self.alerts_path = alerts_path
         self.report_path = report_path
         self.renderer = renderer
-        self.print_fn = print_fn
-        self.print_lock = print_lock
+        self.outbox = outbox
+        self.outbox_lock = outbox_lock
         self._queue = deque(maxlen=1)
         self._queue_lock = threading.Lock()
         self._queue_event = threading.Event()
@@ -209,14 +223,26 @@ class CertGateWorker(threading.Thread):
                     context_line=payload.get("context_line"),
                     provenance=gate_result["provenance"]
                 )
-                with self.print_lock:
-                    for line in lines:
-                        self.print_fn(line)
+                outbox_entry = {
+                    "ts_iso": payload.get("ts_iso"),
+                    "trigger": payload.get("trigger_type"),
+                    "emit_type": payload.get("emit_type"),
+                    "direction": payload.get("direction", "FLAT"),
+                    "lines": lines
+                }
+                with self.outbox_lock:
+                    self.outbox.append(outbox_entry)
             else:
                 if not self._refuse_latched:
                     reason = gate_result["reason"]
-                    with self.print_lock:
-                        self.print_fn(f"[V3 RADAR | CERT] REFUSE  REASON={reason}")
+                    with self.outbox_lock:
+                        self.outbox.append({
+                            "ts_iso": payload.get("ts_iso"),
+                            "trigger": payload.get("trigger_type"),
+                            "emit_type": "REFUSE",
+                            "direction": "FLAT",
+                            "lines": [f"[V3 RADAR | CERT] REFUSE  REASON={reason}"]
+                        })
                     self._refuse_latched = True
 
     def _run_gate(self):
@@ -336,6 +362,8 @@ class PandaScanner:
         self.v3_radar_renderer = RadarRenderer(self.v3_radar_maxlines, self.v3_radar_tone) if self.v3_radar_enabled else None
         self.v3_radar_worker = None
         self.v3_radar_print_lock = threading.Lock()
+        self.v3_cert_outbox = deque()
+        self.v3_cert_outbox_lock = threading.Lock()
         self.phase2_latest_context = None
 
     def _print(self, *args, **kwargs):
@@ -397,8 +425,8 @@ class PandaScanner:
                 self.v3_alerts_path,
                 report_path,
                 self.v3_radar_renderer,
-                self._print,
-                self.v3_radar_print_lock
+                self.v3_cert_outbox,
+                self.v3_cert_outbox_lock
             )
             self.v3_radar_worker.start()
     
@@ -452,6 +480,20 @@ class PandaScanner:
                 self._print(line)
         if self.v3_radar_worker:
             self.v3_radar_worker.enqueue(payload)
+        self._drain_cert_radar_outbox()
+
+    def _drain_cert_radar_outbox(self):
+        if not self.v3_radar_enabled:
+            return
+        with self.v3_cert_outbox_lock:
+            if not self.v3_cert_outbox:
+                return
+            entries = list(self.v3_cert_outbox)
+            self.v3_cert_outbox.clear()
+        with self.v3_radar_print_lock:
+            for entry in entries:
+                for line in entry.get("lines", []):
+                    self._print(line)
 
 
     def load_wallet_first_seen(self):
@@ -1630,7 +1672,9 @@ class PandaScanner:
             if now - last_heartbeat > 60:
                 self.legacy_outbox.append(f"⏱️  {datetime.now(SGT).strftime('%H:%M')} | {events_saved} events tracked | {len(self.completed_minutes)} minutes")
                 last_heartbeat = now
-            
+
+            self._drain_cert_radar_outbox()
+
             time.sleep(POLL_INTERVAL_SECONDS)
         
         # Final minute completion and analysis
@@ -1686,6 +1730,7 @@ class PandaScanner:
         self._v3_window_add(ts, wallet, side, token_amt)
         self._v3_window_evict(ts)
         self._v3_eval_and_emit(ts_iso, ts)
+        self._drain_cert_radar_outbox()
         delta_emits = self.delta_engine.on_event({
             "ts": ts,
             "wallet": wallet,
