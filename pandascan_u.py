@@ -88,7 +88,7 @@ class RadarRenderer:
             lines.append(f"Confidence: {confidence_value}")
         if context_line:
             lines.append(f"Context: {context_line}")
-        return lines[:4]
+        return lines[: self.max_lines]
 
 
 class PandaScanner:
