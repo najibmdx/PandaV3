@@ -18,7 +18,6 @@ import os
 import time
 import signal
 import threading
-import subprocess
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from collections import defaultdict, deque
@@ -90,117 +89,6 @@ class RadarRenderer:
         if context_line:
             lines.append(f"Context: {context_line}")
         return lines[:4]
-
-
-def run_step10_gate(evidence_path, alerts_path, report_path):
-    gate_script = os.path.join(os.path.dirname(__file__), "panda_v3_s10_gate.py")
-    cmd = [
-        sys.executable,
-        gate_script,
-        "--evidence",
-        evidence_path,
-        "--alerts",
-        alerts_path,
-        "--mode",
-        "STRICT",
-        "--validate-in-run",
-        "1",
-        "--max-errors",
-        "5",
-        "--report-out",
-        report_path
-    ]
-    try:
-        completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    except Exception as exc:
-        return {"ok": False, "reason": f"gate_exec_error:{exc}"}
-    if completed.returncode != 0:
-        stderr = (completed.stderr or "").strip()
-        return {"ok": False, "reason": f"gate_exit_{completed.returncode}:{stderr or 'error'}"}
-    try:
-        payload = json.loads((completed.stdout or "").strip() or "{}")
-    except json.JSONDecodeError:
-        return {"ok": False, "reason": "gate_invalid_json"}
-    state = payload.get("state")
-    if state not in {"RUN", "RUN_WITH_WARNINGS"}:
-        return {"ok": False, "reason": f"gate_state_{state}"}
-    errors = payload.get("errors", 0)
-    if isinstance(errors, list):
-        error_count = len(errors)
-    else:
-        error_count = errors
-    trust = payload.get("trust") or "RAW"
-    mode = payload.get("mode") or "STRICT"
-    provenance = (
-        f"GATE={state} MODE={mode} TRUST={trust} "
-        f"VALIDATE_IN_RUN=1 MAX_ERRORS=5 errors={error_count}"
-    )
-    return {"ok": True, "provenance": provenance}
-
-
-class CertGateWorker(threading.Thread):
-    def __init__(self, evidence_path, alerts_path, report_path, renderer, outbox, outbox_lock):
-        super().__init__(daemon=True)
-        self.evidence_path = evidence_path
-        self.alerts_path = alerts_path
-        self.report_path = report_path
-        self.renderer = renderer
-        self.outbox = outbox
-        self.outbox_lock = outbox_lock
-        self._queue = deque()
-        self._queue_lock = threading.Lock()
-        self._queue_event = threading.Event()
-        self._stop_event = threading.Event()
-        self._refuse_latched = False
-
-    def enqueue(self, payload):
-        if self._stop_event.is_set():
-            return
-        with self._queue_lock:
-            self._queue.append(payload)
-        self._queue_event.set()
-
-    def stop(self):
-        self._stop_event.set()
-        self._queue_event.set()
-
-    def run(self):
-        while True:
-            self._queue_event.wait(timeout=0.2)
-            with self._queue_lock:
-                if self._stop_event.is_set() and not self._queue:
-                    break
-                if not self._queue:
-                    self._queue_event.clear()
-                    continue
-                payload = self._queue.popleft()
-                if not self._queue:
-                    self._queue_event.clear()
-            gate_result = self._run_gate()
-            if gate_result["ok"]:
-                lines = self.renderer.render(
-                    "CERT",
-                    payload,
-                    context_line=payload.get("context_line"),
-                    provenance=gate_result["provenance"]
-                )
-                outbox_entry = {
-                    "ts_iso": payload.get("ts_iso"),
-                    "trigger": payload.get("trigger_type"),
-                    "emit_type": payload.get("emit_type"),
-                    "direction": payload.get("direction", "FLAT"),
-                    "subject_id": payload.get("subject_id", ""),
-                    "trigger_id": payload.get("trigger_id", ""),
-                    "lines": lines
-                }
-                with self.outbox_lock:
-                    self.outbox.append(outbox_entry)
-            else:
-                if not self._refuse_latched:
-                    self._refuse_latched = True
-
-    def _run_gate(self):
-        return run_step10_gate(self.evidence_path, self.alerts_path, self.report_path)
 
 
 class PandaScanner:
@@ -282,13 +170,7 @@ class PandaScanner:
         self.v3_radar_maxlines = int(v3_radar_maxlines)
         self.v3_radar_tone = v3_radar_tone or "URGENT"
         self.v3_radar_renderer = RadarRenderer(self.v3_radar_maxlines, self.v3_radar_tone) if self.v3_radar_enabled else None
-        self.v3_radar_worker = None
         self.v3_radar_print_lock = threading.Lock()
-        self.v3_cert_outbox = deque()
-        self.v3_cert_outbox_lock = threading.Lock()
-        self.v3_cert_pending = []
-        self.v3_cert_refuse_latched = False
-        self.v3_cert_report_path = None
         self.phase2_latest_context = None
 
     def _print(self, *args, **kwargs):
@@ -343,24 +225,9 @@ class PandaScanner:
         self.v3_alerts_path = v3_alerts_path
         self.minutes_jsonl_file = open(minutes_jsonl_path, 'a', buffering=1)
         self.delta_feed_file = open(delta_feed_path, 'a', buffering=1, encoding="utf-8", newline="\n")
-        if self.v3_radar_enabled and not self.v3_radar_worker and not self.replay_mode:
-            report_path = os.path.join(self.outdir, f"{self.mint}.s13.step10_report.json")
-            self.v3_cert_report_path = report_path
-            self.v3_radar_worker = CertGateWorker(
-                self.v3_evidence_path,
-                self.v3_alerts_path,
-                report_path,
-                self.v3_radar_renderer,
-                self.v3_cert_outbox,
-                self.v3_cert_outbox_lock
-            )
-            self.v3_radar_worker.start()
-        if self.v3_radar_enabled and self.replay_mode:
-            self.v3_cert_report_path = os.path.join(self.outdir, f"{self.mint}.s13.step10_report.json")
     
     def close_files(self):
         """Close all file handles"""
-        self._shutdown_v3_radar_worker()
         if self.events_file:
             self.events_file.close()
         if self.alerts_file:
@@ -380,13 +247,6 @@ class PandaScanner:
 
     def stop(self):
         self._stop = True
-        self._shutdown_v3_radar_worker()
-
-    def _shutdown_v3_radar_worker(self):
-        if self.v3_radar_worker:
-            self.v3_radar_worker.stop()
-            self.v3_radar_worker.join(timeout=1.5)
-            self.v3_radar_worker = None
 
     def validate_v3_evidence(self):
         if not self.v3_evidence_path:
@@ -412,80 +272,6 @@ class PandaScanner:
             for line in lines:
                 self._print(line)
 
-    def _run_step10_gate_snapshot(self):
-        if not self.v3_evidence_path or not self.v3_alerts_path or not self.v3_cert_report_path:
-            return {"ok": False, "reason": "gate_paths_missing"}
-        return run_step10_gate(self.v3_evidence_path, self.v3_alerts_path, self.v3_cert_report_path)
-
-    def _emit_cert_radar_for_transition(self, payload):
-        return None
-
-    def _parse_ts_iso_to_epoch(self, ts_iso):
-        if not ts_iso:
-            return None
-        try:
-            return datetime.fromisoformat(ts_iso).timestamp()
-        except (TypeError, ValueError):
-            return None
-
-    def _cert_sort_key(self, entry):
-        trigger_order = {"TR1": 0, "TR2": 1, "TR3": 2, "TR6": 3}
-        emit_order = {"ENTER": 0, "UPDATE": 1, "EXIT": 2}
-        ts_epoch = entry.get("ts_epoch")
-        ts_sort = ts_epoch if ts_epoch is not None else float("inf")
-        trigger = entry.get("trigger") or ""
-        emit_type = entry.get("emit_type") or ""
-        subject_key = entry.get("subject_id") or entry.get("trigger_id") or ""
-        return (
-            ts_sort,
-            trigger_order.get(trigger, 99),
-            emit_order.get(emit_type, 99),
-            subject_key,
-            trigger,
-            emit_type
-        )
-
-    def _drain_cert_radar_outbox(self, current_ts_epoch=None, flush_all=False):
-        if not self.v3_radar_enabled:
-            return
-        with self.v3_cert_outbox_lock:
-            if self.v3_cert_outbox:
-                entries = list(self.v3_cert_outbox)
-                self.v3_cert_outbox.clear()
-            else:
-                entries = []
-        if entries:
-            for entry in entries:
-                ts_epoch = self._parse_ts_iso_to_epoch(entry.get("ts_iso"))
-                entry["ts_epoch"] = ts_epoch
-                self.v3_cert_pending.append(entry)
-        self._emit_pending_cert(current_ts_epoch=current_ts_epoch, flush_all=flush_all)
-
-    def _emit_pending_cert(self, current_ts_epoch=None, flush_all=False):
-        if not self.v3_cert_pending:
-            return
-        if flush_all:
-            emit_ready = list(self.v3_cert_pending)
-            self.v3_cert_pending = []
-        else:
-            if current_ts_epoch is None:
-                return
-            emit_ready = []
-            remaining = []
-            for entry in self.v3_cert_pending:
-                entry_ts = entry.get("ts_epoch")
-                if entry_ts is not None and entry_ts <= current_ts_epoch:
-                    emit_ready.append(entry)
-                else:
-                    remaining.append(entry)
-            self.v3_cert_pending = remaining
-        if not emit_ready:
-            return
-        emit_ready.sort(key=self._cert_sort_key)
-        with self.v3_radar_print_lock:
-            for entry in emit_ready:
-                for line in entry.get("lines", []):
-                    self._print(line)
 
 
     def load_wallet_first_seen(self):
@@ -1788,8 +1574,6 @@ class PandaScanner:
                 self.legacy_outbox.append(f"⏱️  {datetime.now(SGT).strftime('%H:%M')} | {events_saved} events tracked | {len(self.completed_minutes)} minutes")
                 last_heartbeat = now
 
-            self._drain_cert_radar_outbox(current_ts_epoch=self._now_epoch())
-
             time.sleep(POLL_INTERVAL_SECONDS)
         
         # Final minute completion and analysis
@@ -1845,7 +1629,6 @@ class PandaScanner:
         self._v3_window_add(ts, wallet, side, token_amt)
         self._v3_window_evict(ts)
         self._v3_eval_and_emit(ts_iso, ts)
-        self._drain_cert_radar_outbox(current_ts_epoch=ts)
         delta_emits = self.delta_engine.on_event({
             "ts": ts,
             "wallet": wallet,
