@@ -215,8 +215,6 @@ class CertGateWorker(threading.Thread):
             self._queue_event.clear()
             gate_result = self._run_gate()
             if gate_result["ok"]:
-                if self._refuse_latched:
-                    self._refuse_latched = False
                 lines = self.renderer.render(
                     "CERT",
                     payload,
@@ -228,6 +226,8 @@ class CertGateWorker(threading.Thread):
                     "trigger": payload.get("trigger_type"),
                     "emit_type": payload.get("emit_type"),
                     "direction": payload.get("direction", "FLAT"),
+                    "subject_id": payload.get("subject_id", ""),
+                    "trigger_id": payload.get("trigger_id", ""),
                     "lines": lines
                 }
                 with self.outbox_lock:
@@ -364,6 +364,7 @@ class PandaScanner:
         self.v3_radar_print_lock = threading.Lock()
         self.v3_cert_outbox = deque()
         self.v3_cert_outbox_lock = threading.Lock()
+        self.v3_cert_pending = []
         self.phase2_latest_context = None
 
     def _print(self, *args, **kwargs):
@@ -480,18 +481,71 @@ class PandaScanner:
                 self._print(line)
         if self.v3_radar_worker:
             self.v3_radar_worker.enqueue(payload)
-        self._drain_cert_radar_outbox()
 
-    def _drain_cert_radar_outbox(self):
+    def _parse_ts_iso_to_epoch(self, ts_iso):
+        if not ts_iso:
+            return None
+        try:
+            return datetime.fromisoformat(ts_iso).timestamp()
+        except (TypeError, ValueError):
+            return None
+
+    def _cert_sort_key(self, entry):
+        trigger_order = {"TR1": 0, "TR2": 1, "TR3": 2, "TR6": 3}
+        emit_order = {"ENTER": 0, "UPDATE": 1, "EXIT": 2}
+        ts_epoch = entry.get("ts_epoch")
+        ts_sort = ts_epoch if ts_epoch is not None else float("inf")
+        trigger = entry.get("trigger") or ""
+        emit_type = entry.get("emit_type") or ""
+        subject_key = entry.get("subject_id") or entry.get("trigger_id") or ""
+        return (
+            ts_sort,
+            trigger_order.get(trigger, 99),
+            emit_order.get(emit_type, 99),
+            subject_key,
+            trigger,
+            emit_type
+        )
+
+    def _drain_cert_radar_outbox(self, current_ts_epoch=None, flush_all=False):
         if not self.v3_radar_enabled:
             return
         with self.v3_cert_outbox_lock:
-            if not self.v3_cert_outbox:
-                return
-            entries = list(self.v3_cert_outbox)
-            self.v3_cert_outbox.clear()
-        with self.v3_radar_print_lock:
+            if self.v3_cert_outbox:
+                entries = list(self.v3_cert_outbox)
+                self.v3_cert_outbox.clear()
+            else:
+                entries = []
+        if entries:
             for entry in entries:
+                ts_epoch = self._parse_ts_iso_to_epoch(entry.get("ts_iso"))
+                entry["ts_epoch"] = ts_epoch
+                self.v3_cert_pending.append(entry)
+        self._emit_pending_cert(current_ts_epoch=current_ts_epoch, flush_all=flush_all)
+
+    def _emit_pending_cert(self, current_ts_epoch=None, flush_all=False):
+        if not self.v3_cert_pending:
+            return
+        if flush_all:
+            emit_ready = list(self.v3_cert_pending)
+            self.v3_cert_pending = []
+        else:
+            if current_ts_epoch is None:
+                return
+            emit_ready = []
+            remaining = []
+            for entry in self.v3_cert_pending:
+                entry_ts = entry.get("ts_epoch")
+                if entry_ts is not None and entry_ts <= current_ts_epoch:
+                    emit_ready.append(entry)
+                else:
+                    remaining.append(entry)
+            self.v3_cert_pending = remaining
+        if not emit_ready:
+            return
+        emit_ready.sort(key=self._cert_sort_key)
+        with self.v3_radar_print_lock:
+            for entry in emit_ready:
                 for line in entry.get("lines", []):
                     self._print(line)
 
@@ -918,6 +972,7 @@ class PandaScanner:
                     "ts_iso": ts_iso,
                     "emit_type": emit_type,
                     "trigger_type": trigger_type,
+                    "trigger_id": trigger_id,
                     "active_now": active_now,
                     "confidence_now": confidence_now,
                     "prev_confidence": prev_confidence,
@@ -1673,7 +1728,7 @@ class PandaScanner:
                 self.legacy_outbox.append(f"⏱️  {datetime.now(SGT).strftime('%H:%M')} | {events_saved} events tracked | {len(self.completed_minutes)} minutes")
                 last_heartbeat = now
 
-            self._drain_cert_radar_outbox()
+            self._drain_cert_radar_outbox(current_ts_epoch=self._now_epoch())
 
             time.sleep(POLL_INTERVAL_SECONDS)
         
@@ -1700,6 +1755,7 @@ class PandaScanner:
             events_saved += 1
         if self.current_minute is not None:
             self._finalize_minute(self.current_minute)
+        self._drain_cert_radar_outbox(flush_all=True)
         self.legacy_outbox.append(f"\n📊 Replay summary: {events_saved} events, {len(self.completed_minutes)} minutes")
 
     def _write_meta(self, started_local_wallclock):
@@ -1730,7 +1786,7 @@ class PandaScanner:
         self._v3_window_add(ts, wallet, side, token_amt)
         self._v3_window_evict(ts)
         self._v3_eval_and_emit(ts_iso, ts)
-        self._drain_cert_radar_outbox()
+        self._drain_cert_radar_outbox(current_ts_epoch=ts)
         delta_emits = self.delta_engine.on_event({
             "ts": ts,
             "wallet": wallet,
