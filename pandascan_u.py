@@ -172,6 +172,52 @@ class RadarRenderer:
         return trimmed_lines
 
 
+def run_step10_gate(evidence_path, alerts_path, report_path):
+    gate_script = os.path.join(os.path.dirname(__file__), "panda_v3_s10_gate.py")
+    cmd = [
+        sys.executable,
+        gate_script,
+        "--evidence",
+        evidence_path,
+        "--alerts",
+        alerts_path,
+        "--mode",
+        "STRICT",
+        "--validate-in-run",
+        "1",
+        "--max-errors",
+        "5",
+        "--report-out",
+        report_path
+    ]
+    try:
+        completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except Exception as exc:
+        return {"ok": False, "reason": f"gate_exec_error:{exc}"}
+    if completed.returncode != 0:
+        stderr = (completed.stderr or "").strip()
+        return {"ok": False, "reason": f"gate_exit_{completed.returncode}:{stderr or 'error'}"}
+    try:
+        payload = json.loads((completed.stdout or "").strip() or "{}")
+    except json.JSONDecodeError:
+        return {"ok": False, "reason": "gate_invalid_json"}
+    state = payload.get("state")
+    if state not in {"RUN", "RUN_WITH_WARNINGS"}:
+        return {"ok": False, "reason": f"gate_state_{state}"}
+    errors = payload.get("errors", 0)
+    if isinstance(errors, list):
+        error_count = len(errors)
+    else:
+        error_count = errors
+    trust = payload.get("trust") or "RAW"
+    mode = payload.get("mode") or "STRICT"
+    provenance = (
+        f"GATE={state} MODE={mode} TRUST={trust} "
+        f"VALIDATE_IN_RUN=1 MAX_ERRORS=5 errors={error_count}"
+    )
+    return {"ok": True, "provenance": provenance}
+
+
 class CertGateWorker(threading.Thread):
     def __init__(self, evidence_path, alerts_path, report_path, renderer, outbox, outbox_lock):
         super().__init__(daemon=True)
@@ -181,7 +227,7 @@ class CertGateWorker(threading.Thread):
         self.renderer = renderer
         self.outbox = outbox
         self.outbox_lock = outbox_lock
-        self._queue = deque(maxlen=1)
+        self._queue = deque()
         self._queue_lock = threading.Lock()
         self._queue_event = threading.Event()
         self._stop_event = threading.Event()
@@ -191,7 +237,6 @@ class CertGateWorker(threading.Thread):
         if self._stop_event.is_set():
             return
         with self._queue_lock:
-            self._queue.clear()
             self._queue.append(payload)
         self._queue_event.set()
 
@@ -203,16 +248,14 @@ class CertGateWorker(threading.Thread):
         while True:
             self._queue_event.wait(timeout=0.2)
             with self._queue_lock:
-                has_payload = bool(self._queue)
-            if self._stop_event.is_set() and not has_payload:
-                break
-            if not has_payload:
-                self._queue_event.clear()
-                continue
-            with self._queue_lock:
-                payload = self._queue.pop()
-                self._queue.clear()
-            self._queue_event.clear()
+                if self._stop_event.is_set() and not self._queue:
+                    break
+                if not self._queue:
+                    self._queue_event.clear()
+                    continue
+                payload = self._queue.popleft()
+                if not self._queue:
+                    self._queue_event.clear()
             gate_result = self._run_gate()
             if gate_result["ok"]:
                 lines = self.renderer.render(
@@ -246,49 +289,7 @@ class CertGateWorker(threading.Thread):
                     self._refuse_latched = True
 
     def _run_gate(self):
-        gate_script = os.path.join(os.path.dirname(__file__), "panda_v3_s10_gate.py")
-        cmd = [
-            sys.executable,
-            gate_script,
-            "--evidence",
-            self.evidence_path,
-            "--alerts",
-            self.alerts_path,
-            "--mode",
-            "STRICT",
-            "--validate-in-run",
-            "1",
-            "--max-errors",
-            "5",
-            "--report-out",
-            self.report_path
-        ]
-        try:
-            completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        except Exception as exc:
-            return {"ok": False, "reason": f"gate_exec_error:{exc}"}
-        if completed.returncode != 0:
-            stderr = (completed.stderr or "").strip()
-            return {"ok": False, "reason": f"gate_exit_{completed.returncode}:{stderr or 'error'}"}
-        try:
-            payload = json.loads((completed.stdout or "").strip() or "{}")
-        except json.JSONDecodeError:
-            return {"ok": False, "reason": "gate_invalid_json"}
-        state = payload.get("state")
-        if state not in {"RUN", "RUN_WITH_WARNINGS"}:
-            return {"ok": False, "reason": f"gate_state_{state}"}
-        errors = payload.get("errors", 0)
-        if isinstance(errors, list):
-            error_count = len(errors)
-        else:
-            error_count = errors
-        trust = payload.get("trust") or "RAW"
-        mode = payload.get("mode") or "STRICT"
-        provenance = (
-            f"GATE={state} MODE={mode} TRUST={trust} "
-            f"VALIDATE_IN_RUN=1 MAX_ERRORS=5 errors={error_count}"
-        )
-        return {"ok": True, "provenance": provenance}
+        return run_step10_gate(self.evidence_path, self.alerts_path, self.report_path)
 
 
 class PandaScanner:
@@ -365,6 +366,8 @@ class PandaScanner:
         self.v3_cert_outbox = deque()
         self.v3_cert_outbox_lock = threading.Lock()
         self.v3_cert_pending = []
+        self.v3_cert_refuse_latched = False
+        self.v3_cert_report_path = None
         self.phase2_latest_context = None
 
     def _print(self, *args, **kwargs):
@@ -419,8 +422,9 @@ class PandaScanner:
         self.v3_alerts_path = v3_alerts_path
         self.minutes_jsonl_file = open(minutes_jsonl_path, 'a', buffering=1)
         self.delta_feed_file = open(delta_feed_path, 'a', buffering=1, encoding="utf-8", newline="\n")
-        if self.v3_radar_enabled and not self.v3_radar_worker:
+        if self.v3_radar_enabled and not self.v3_radar_worker and not self.replay_mode:
             report_path = os.path.join(self.outdir, f"{self.mint}.s13.step10_report.json")
+            self.v3_cert_report_path = report_path
             self.v3_radar_worker = CertGateWorker(
                 self.v3_evidence_path,
                 self.v3_alerts_path,
@@ -430,6 +434,8 @@ class PandaScanner:
                 self.v3_cert_outbox_lock
             )
             self.v3_radar_worker.start()
+        if self.v3_radar_enabled and self.replay_mode:
+            self.v3_cert_report_path = os.path.join(self.outdir, f"{self.mint}.s13.step10_report.json")
     
     def close_files(self):
         """Close all file handles"""
@@ -476,11 +482,40 @@ class PandaScanner:
             payload,
             context_line=payload.get("context_line")
         )
+        if self.replay_mode:
+            cert_lines = self._emit_cert_radar_for_transition(payload)
+            with self.v3_radar_print_lock:
+                for line in lines:
+                    self._print(line)
+                if cert_lines:
+                    for line in cert_lines:
+                        self._print(line)
+            return
         with self.v3_radar_print_lock:
             for line in lines:
                 self._print(line)
         if self.v3_radar_worker:
             self.v3_radar_worker.enqueue(payload)
+
+    def _run_step10_gate_snapshot(self):
+        if not self.v3_evidence_path or not self.v3_alerts_path or not self.v3_cert_report_path:
+            return {"ok": False, "reason": "gate_paths_missing"}
+        return run_step10_gate(self.v3_evidence_path, self.v3_alerts_path, self.v3_cert_report_path)
+
+    def _emit_cert_radar_for_transition(self, payload):
+        gate_result = self._run_step10_gate_snapshot()
+        if gate_result["ok"]:
+            return self.v3_radar_renderer.render(
+                "CERT",
+                payload,
+                context_line=payload.get("context_line"),
+                provenance=gate_result["provenance"]
+            )
+        if not self.v3_cert_refuse_latched:
+            reason = gate_result["reason"]
+            self.v3_cert_refuse_latched = True
+            return [f"[V3 RADAR | CERT] REFUSE  REASON={reason}"]
+        return None
 
     def _parse_ts_iso_to_epoch(self, ts_iso):
         if not ts_iso:
