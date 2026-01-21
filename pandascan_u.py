@@ -1669,7 +1669,7 @@ class PandaScanner:
         self.attach_epoch = int(time.time())
         self.attach_ts = datetime.fromtimestamp(self.attach_epoch, tz=SGT)
         self._write_meta(self.attach_ts.isoformat())
-        self._print(f"=== PANDA LIVE SCANNER (SPEC v2.0) ===")
+        self._print(f"=== PANDA LIVE SCANNER (SPEC v3.0) ===")
         self._print(f"Mint: {self.mint}")
         self._print(f"Started: {self.attach_ts.strftime('%H:%M:%S')}")
         self._print(f"Attach (SGT): {self.attach_ts.isoformat()}")
