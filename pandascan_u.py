@@ -1981,7 +1981,7 @@ def main():
     parser.add_argument('--delta-only', type=int, default=0, choices=[0, 1], help='1=suppress legacy stdout')
     parser.add_argument('--replay-in', dest='replay_in', default=None, help='Replay input dir for <mint>.events.jsonl or <mint>.events.csv')
     parser.add_argument('--validate-v3-evidence', dest='validate_v3_evidence', type=int, choices=[0, 1], default=None, help='Replay-only v3 evidence JSONL validation (1=on, 0=off)')
-    parser.add_argument('--v3-radar', dest='v3_radar', type=int, choices=[0, 1], default=0, help='1=enable V3 radar on-screen output')
+    parser.add_argument('--v3-radar', dest='v3_radar', type=int, choices=[0, 1], default=1, help='1=enable V3 radar on-screen output')
     parser.add_argument('--v3-radar-maxlines', dest='v3_radar_maxlines', type=int, default=8, help='Maximum lines per radar block')
     parser.add_argument('--v3-radar-tone', dest='v3_radar_tone', type=str, default='URGENT', help='Radar tone label')
     
