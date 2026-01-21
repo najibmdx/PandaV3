@@ -1790,7 +1790,6 @@ class PandaScanner:
             events_saved += 1
         if self.current_minute is not None:
             self._finalize_minute(self.current_minute)
-        self._drain_cert_radar_outbox(flush_all=True)
         self.legacy_outbox.append(f"\n📊 Replay summary: {events_saved} events, {len(self.completed_minutes)} minutes")
 
     def _write_meta(self, started_local_wallclock):
