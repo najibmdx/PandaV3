@@ -1975,8 +1975,8 @@ def validate_v3_evidence_jsonl(file_path):
 
 def main():
     parser = argparse.ArgumentParser(description='PANDA - Wallet Intelligence Scanner (Spec v2.0)')
-    parser.add_argument('--mint', required=True, help='Token mint address (CA)')
-    parser.add_argument('--outdir', required=True, help='Output directory')
+    parser.add_argument('--mint', help='Token mint address (CA)')
+    parser.add_argument('--outdir', default='logs', help='Output directory')
     parser.add_argument('--fresh', type=int, default=0, choices=[0, 1], help='1=new files required')
     parser.add_argument('--delta-only', type=int, default=0, choices=[0, 1], help='1=suppress legacy stdout')
     parser.add_argument('--replay-in', dest='replay_in', default=None, help='Replay input dir for <mint>.events.jsonl or <mint>.events.csv')
@@ -1986,6 +1986,12 @@ def main():
     parser.add_argument('--v3-radar-tone', dest='v3_radar_tone', type=str, default='URGENT', help='Radar tone label')
     
     args = parser.parse_args()
+    if not args.mint:
+        mint_input = input("Paste mint (CA) to scan: ").strip()
+        if not mint_input:
+            sys.stderr.write("ERROR: mint (CA) is required\n")
+            sys.exit(1)
+        args.mint = mint_input
 
     helius_key = None
     if not args.replay_in:
