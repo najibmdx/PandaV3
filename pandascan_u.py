@@ -1977,7 +1977,7 @@ def main():
     parser = argparse.ArgumentParser(description='PANDA - Wallet Intelligence Scanner (Spec v2.0)')
     parser.add_argument('--mint', required=True, help='Token mint address (CA)')
     parser.add_argument('--outdir', required=True, help='Output directory')
-    parser.add_argument('--fresh', type=int, required=True, choices=[0, 1], help='1=new files required')
+    parser.add_argument('--fresh', type=int, default=0, choices=[0, 1], help='1=new files required')
     parser.add_argument('--delta-only', type=int, default=0, choices=[0, 1], help='1=suppress legacy stdout')
     parser.add_argument('--replay-in', dest='replay_in', default=None, help='Replay input dir for <mint>.events.jsonl or <mint>.events.csv')
     parser.add_argument('--validate-v3-evidence', dest='validate_v3_evidence', type=int, choices=[0, 1], default=None, help='Replay-only v3 evidence JSONL validation (1=on, 0=off)')
