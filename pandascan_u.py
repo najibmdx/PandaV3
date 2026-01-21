@@ -18,6 +18,8 @@ import os
 import sys
 import time
 import signal
+import threading
+import subprocess
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from collections import defaultdict, deque
@@ -59,10 +61,214 @@ V3_EVIDENCE_REQUIRED_KEYS = (
 )
 
 
+CONFIDENCE_RANKS = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+
+class RadarRenderer:
+    def __init__(self, max_lines=8, tone="URGENT"):
+        self.max_lines = max(3, int(max_lines))
+        self.tone = tone or "URGENT"
+
+    def _state_label(self, emit_type, confidence_now, prev_confidence):
+        if emit_type == "ENTER":
+            return "STRUCTURE FORMING"
+        if emit_type == "EXIT":
+            return "STRUCTURE LOST"
+        prev_rank = CONFIDENCE_RANKS.get(prev_confidence or "LOW", 0)
+        now_rank = CONFIDENCE_RANKS.get(confidence_now or "LOW", 0)
+        if now_rank >= prev_rank:
+            return "STRUCTURE STRENGTHENING"
+        return "STRUCTURE WEAKENING"
+
+    def _meaning_lines(self, trigger_type, metrics, active_now, confidence_now):
+        lines = []
+        confidence_rank = CONFIDENCE_RANKS.get(confidence_now or "LOW", 0)
+        if trigger_type == "TR1":
+            top1_share = metrics.get("top1_share", 0.0)
+            top1_count = metrics.get("top1_count", 0)
+            if top1_share >= 0.70:
+                lines.append("One wallet is seizing the wheel — flow is tightly concentrated.")
+            elif top1_share >= 0.60:
+                lines.append("One wallet is steering most of the flow right now.")
+            else:
+                lines.append("A single wallet is leading the tape in this window.")
+            if top1_count >= 4:
+                lines.append("Repeated hits from the same wallet are stacking momentum.")
+            if confidence_rank >= 2 and active_now:
+                lines.append("Crowd participation is compressing around that leader.")
+        elif trigger_type == "TR2":
+            top_seller_share = metrics.get("top_seller_share", 0.0)
+            if top_seller_share >= 0.55:
+                lines.append("Sell pressure is concentrated — one wallet is driving it.")
+            else:
+                lines.append("A single wallet is leaning hard on the sell side.")
+            if metrics.get("top_seller_sell_count", 0) >= 3:
+                lines.append("The same seller keeps tapping the tape.")
+            if confidence_rank >= 1 and active_now:
+                lines.append("Pressure is dominating the flow, not dispersed.")
+        elif trigger_type == "TR3":
+            group_share = metrics.get("best_group_share", 0.0)
+            group_count = metrics.get("best_group_wallets_count", 0)
+            if group_share >= 0.75:
+                lines.append("A cohort is moving as a block — coordination is tight.")
+            else:
+                lines.append("A wallet cohort is acting in sync in this window.")
+            if group_count >= 6:
+                lines.append("The pack is sizable and leaning together.")
+            if confidence_rank >= 1 and active_now:
+                lines.append("Flow is clustering around the same group.")
+        elif trigger_type == "TR6":
+            micro_wallet_count = metrics.get("micro_wallet_count", 0)
+            micro_trade_count_total = metrics.get("micro_trade_count_total", 0)
+            if micro_wallet_count >= 15 or micro_trade_count_total >= 35:
+                lines.append("A micro-wallet swarm is amplifying the tape fast.")
+            else:
+                lines.append("Micro wallets are firing in a tight burst.")
+            if micro_wallet_count >= 10:
+                lines.append("Swarm density is rising, not scattered.")
+            if confidence_rank >= 1 and active_now:
+                lines.append("The flow feels automated and clustered.")
+        else:
+            lines.append("Structure activity is shifting in this window.")
+        return lines
+
+    def _why_line(self, intel, warning, reason):
+        text = warning or reason or intel
+        if not text:
+            return None
+        return f"Why this matters: {text}"
+
+    def render(self, plane, transition, context_line=None, provenance=None):
+        header = f"[V3 RADAR | {plane}] {self._state_label(transition['emit_type'], transition['confidence_now'], transition.get('prev_confidence'))}"
+        meaning_lines = self._meaning_lines(
+            transition["trigger_type"],
+            transition.get("metrics", {}),
+            transition.get("active_now", False),
+            transition["confidence_now"]
+        )
+        why_line = self._why_line(transition.get("intel"), transition.get("warning"), transition.get("reason"))
+        core_lines = [header] + meaning_lines
+        if why_line:
+            core_lines.append(why_line)
+        if context_line:
+            core_lines.append(f"Context: {context_line}")
+        if plane == "CERT" and provenance:
+            core_lines.append(f"Provenance: {provenance}")
+        confidence_line = f"Confidence: {transition['confidence_now']}"
+        core_lines = core_lines[: max(self.max_lines - 1, 1)]
+        return core_lines + [confidence_line]
+
+
+class CertGateWorker(threading.Thread):
+    def __init__(self, evidence_path, alerts_path, report_path, renderer, print_fn, print_lock):
+        super().__init__(daemon=True)
+        self.evidence_path = evidence_path
+        self.alerts_path = alerts_path
+        self.report_path = report_path
+        self.renderer = renderer
+        self.print_fn = print_fn
+        self.print_lock = print_lock
+        self._queue = deque(maxlen=1)
+        self._queue_lock = threading.Lock()
+        self._queue_event = threading.Event()
+        self._stop_event = threading.Event()
+        self._refuse_latched = False
+
+    def enqueue(self, payload):
+        if self._stop_event.is_set():
+            return
+        with self._queue_lock:
+            self._queue.clear()
+            self._queue.append(payload)
+        self._queue_event.set()
+
+    def stop(self):
+        self._stop_event.set()
+        self._queue_event.set()
+
+    def run(self):
+        while True:
+            self._queue_event.wait(timeout=0.2)
+            with self._queue_lock:
+                has_payload = bool(self._queue)
+            if self._stop_event.is_set() and not has_payload:
+                break
+            if not has_payload:
+                self._queue_event.clear()
+                continue
+            with self._queue_lock:
+                payload = self._queue.pop()
+                self._queue.clear()
+            self._queue_event.clear()
+            gate_result = self._run_gate()
+            if gate_result["ok"]:
+                if self._refuse_latched:
+                    self._refuse_latched = False
+                lines = self.renderer.render(
+                    "CERT",
+                    payload,
+                    context_line=payload.get("context_line"),
+                    provenance=gate_result["provenance"]
+                )
+                with self.print_lock:
+                    for line in lines:
+                        self.print_fn(line)
+            else:
+                if not self._refuse_latched:
+                    reason = gate_result["reason"]
+                    with self.print_lock:
+                        self.print_fn(f"[V3 RADAR | CERT] REFUSE  REASON={reason}")
+                    self._refuse_latched = True
+
+    def _run_gate(self):
+        gate_script = os.path.join(os.path.dirname(__file__), "panda_v3_s10_gate.py")
+        cmd = [
+            sys.executable,
+            gate_script,
+            "--evidence",
+            self.evidence_path,
+            "--alerts",
+            self.alerts_path,
+            "--mode",
+            "STRICT",
+            "--validate-in-run",
+            "1",
+            "--max-errors",
+            "5",
+            "--report-out",
+            self.report_path
+        ]
+        try:
+            completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        except Exception as exc:
+            return {"ok": False, "reason": f"gate_exec_error:{exc}"}
+        if completed.returncode != 0:
+            stderr = (completed.stderr or "").strip()
+            return {"ok": False, "reason": f"gate_exit_{completed.returncode}:{stderr or 'error'}"}
+        try:
+            payload = json.loads((completed.stdout or "").strip() or "{}")
+        except json.JSONDecodeError:
+            return {"ok": False, "reason": "gate_invalid_json"}
+        state = payload.get("state")
+        if state not in {"RUN", "RUN_WITH_WARNINGS"}:
+            return {"ok": False, "reason": f"gate_state_{state}"}
+        errors = payload.get("errors", 0)
+        if isinstance(errors, list):
+            error_count = len(errors)
+        else:
+            error_count = errors
+        trust = payload.get("trust") or "RAW"
+        mode = payload.get("mode") or "STRICT"
+        provenance = (
+            f"GATE={state} MODE={mode} TRUST={trust} "
+            f"VALIDATE_IN_RUN=1 MAX_ERRORS=5 errors={error_count}"
+        )
+        return {"ok": True, "provenance": provenance}
+
+
 class PandaScanner:
     """Stateless wallet intelligence scanner for a single mint"""
     
-    def __init__(self, mint, outdir, helius_key, delta_only=False, replay_mode=False):
+    def __init__(self, mint, outdir, helius_key, delta_only=False, replay_mode=False, v3_radar=False, v3_radar_maxlines=8, v3_radar_tone="URGENT"):
         self.mint = mint
         self.outdir = outdir
         self.helius_key = helius_key
@@ -112,6 +318,7 @@ class PandaScanner:
         self.events_jsonl_file = None
         self.v3_evidence_file = None
         self.v3_evidence_path = None
+        self.v3_alerts_path = None
         self.minutes_jsonl_file = None
         self.delta_feed_file = None
         self.alerts_emitted = []
@@ -123,6 +330,13 @@ class PandaScanner:
         self.legacy_outbox = deque()
         self.legacy_next_emit_ts = 0.0
         self._stop = False
+        self.v3_radar_enabled = bool(v3_radar)
+        self.v3_radar_maxlines = int(v3_radar_maxlines)
+        self.v3_radar_tone = v3_radar_tone or "URGENT"
+        self.v3_radar_renderer = RadarRenderer(self.v3_radar_maxlines, self.v3_radar_tone) if self.v3_radar_enabled else None
+        self.v3_radar_worker = None
+        self.v3_radar_print_lock = threading.Lock()
+        self.phase2_latest_context = None
 
     def _print(self, *args, **kwargs):
         file = kwargs.get("file", sys.stdout)
@@ -173,11 +387,24 @@ class PandaScanner:
         self.events_jsonl_file = open(events_jsonl_path, 'a', buffering=1)
         self.v3_evidence_file = open(v3_evidence_path, 'a', buffering=1)
         self.v3_evidence_path = v3_evidence_path
+        self.v3_alerts_path = v3_alerts_path
         self.minutes_jsonl_file = open(minutes_jsonl_path, 'a', buffering=1)
         self.delta_feed_file = open(delta_feed_path, 'a', buffering=1, encoding="utf-8", newline="\n")
+        if self.v3_radar_enabled and not self.v3_radar_worker:
+            report_path = os.path.join(self.outdir, f"{self.mint}.s13.step10_report.json")
+            self.v3_radar_worker = CertGateWorker(
+                self.v3_evidence_path,
+                self.v3_alerts_path,
+                report_path,
+                self.v3_radar_renderer,
+                self._print,
+                self.v3_radar_print_lock
+            )
+            self.v3_radar_worker.start()
     
     def close_files(self):
         """Close all file handles"""
+        self._shutdown_v3_radar_worker()
         if self.events_file:
             self.events_file.close()
         if self.alerts_file:
@@ -197,11 +424,35 @@ class PandaScanner:
 
     def stop(self):
         self._stop = True
+        self._shutdown_v3_radar_worker()
+
+    def _shutdown_v3_radar_worker(self):
+        if self.v3_radar_worker:
+            self.v3_radar_worker.stop()
+            self.v3_radar_worker.join(timeout=1.5)
+            self.v3_radar_worker = None
 
     def validate_v3_evidence(self):
         if not self.v3_evidence_path:
             raise RuntimeError("v3 evidence path not set")
         validate_v3_evidence_jsonl(self.v3_evidence_path)
+
+    def _emit_v3_radar(self, payload):
+        if not self.v3_radar_enabled or self.delta_only:
+            return
+        if not self.v3_radar_renderer:
+            return
+        lines = self.v3_radar_renderer.render(
+            "LIVE",
+            payload,
+            context_line=payload.get("context_line")
+        )
+        with self.v3_radar_print_lock:
+            for line in lines:
+                self._print(line)
+        if self.v3_radar_worker:
+            self.v3_radar_worker.enqueue(payload)
+
 
     def load_wallet_first_seen(self):
         """Load persistent wallet first-seen data from TSV (append-only)."""
@@ -551,6 +802,7 @@ class PandaScanner:
         def emit_transition(trigger_type, active_now, confidence_now, subject_type, subject_id, subject_members, category, intel, warning, trigger_id):
             prev_state = self.v3_state[trigger_type]
             prev_active = prev_state["active"]
+            prev_confidence = prev_state["confidence"]
             emit_type = None
             if not prev_active and active_now:
                 emit_type = "ENTER"
@@ -619,6 +871,25 @@ class PandaScanner:
                     self.v3_evidence_file.write(json.dumps(evidence_row) + "\n")
                 except Exception:
                     pass
+
+                radar_payload = {
+                    "ts_iso": ts_iso,
+                    "emit_type": emit_type,
+                    "trigger_type": trigger_type,
+                    "active_now": active_now,
+                    "confidence_now": confidence_now,
+                    "prev_confidence": prev_confidence,
+                    "subject_type": subject_type,
+                    "subject_id": subject_id,
+                    "subject_members": subject_members,
+                    "category": category,
+                    "intel": intel,
+                    "warning": warning,
+                    "metrics": metrics_map.get(trigger_type, {}),
+                    "reason": reason_map.get(trigger_type, ""),
+                    "context_line": self.phase2_latest_context
+                }
+                self._emit_v3_radar(radar_payload)
 
             if active_now:
                 self.v3_state[trigger_type] = {
@@ -1484,6 +1755,9 @@ class PandaScanner:
             narrative = sell_context.description if sell_context else (buy_context.description if buy_context else None)
             if narrative:
                 self.legacy_outbox.append(f"        {narrative}")
+            self.phase2_latest_context = narrative
+        else:
+            self.phase2_latest_context = None
 
         self.alerts_emitted = []
         self.analyze_signals()
@@ -1572,6 +1846,9 @@ def main():
     parser.add_argument('--delta-only', type=int, default=0, choices=[0, 1], help='1=suppress legacy stdout')
     parser.add_argument('--replay-in', dest='replay_in', default=None, help='Replay input dir for <mint>.events.jsonl or <mint>.events.csv')
     parser.add_argument('--validate-v3-evidence', dest='validate_v3_evidence', type=int, choices=[0, 1], default=None, help='Replay-only v3 evidence JSONL validation (1=on, 0=off)')
+    parser.add_argument('--v3-radar', dest='v3_radar', type=int, choices=[0, 1], default=0, help='1=enable V3 radar on-screen output')
+    parser.add_argument('--v3-radar-maxlines', dest='v3_radar_maxlines', type=int, default=8, help='Maximum lines per radar block')
+    parser.add_argument('--v3-radar-tone', dest='v3_radar_tone', type=str, default='URGENT', help='Radar tone label')
     
     args = parser.parse_args()
 
@@ -1590,7 +1867,16 @@ def main():
     else:
         validate_v3_evidence = 0
 
-    scanner = PandaScanner(args.mint, args.outdir, helius_key or "", delta_only=args.delta_only == 1, replay_mode=bool(args.replay_in))
+    scanner = PandaScanner(
+        args.mint,
+        args.outdir,
+        helius_key or "",
+        delta_only=args.delta_only == 1,
+        replay_mode=bool(args.replay_in),
+        v3_radar=args.v3_radar == 1,
+        v3_radar_maxlines=args.v3_radar_maxlines,
+        v3_radar_tone=args.v3_radar_tone
+    )
 
     def handle_signal(_signum, _frame):
         scanner.stop()
